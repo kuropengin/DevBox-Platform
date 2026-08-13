@@ -156,15 +156,24 @@ ok "systemd ユニットインストール完了"
 
 # ─── 11. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
-AUTHENTIK_URL="${AUTHENTIK_URL:-https://auth.example.com}"
+AUTHENTIK_URL="${AUTHENTIK_URL:-}"
+AUTHENTIK_ENABLED="no"
+[[ -n "$AUTHENTIK_URL" && "$AUTHENTIK_URL" != "https://auth.example.com" ]] && AUTHENTIK_ENABLED="yes"
 
-cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
+# プラットフォーム設定を保存（adduser.sh が参照）
+cat > /etc/devbox/platform.conf << PLATFORM_EOF
+DEVBOX_DOMAIN=${DOMAIN}
+AUTHENTIK_URL=${AUTHENTIK_URL:-}
+AUTHENTIK_ENABLED=${AUTHENTIK_ENABLED}
+PLATFORM_EOF
+
+if [[ "$AUTHENTIK_ENABLED" == "yes" ]]; then
+  cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - メインサーバー設定（install.sh が生成）
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name _;
 
-    # Authentik Forward Auth エンドポイント
     location /outpost.goauthentik.io {
         proxy_pass              ${AUTHENTIK_URL}/outpost.goauthentik.io;
         proxy_set_header        Host \$host;
@@ -186,13 +195,30 @@ server {
         add_header Content-Type text/plain;
     }
 
-    # ユーザー別ロケーション（adduser.sh が追加）
     include /etc/nginx/conf.d/devbox-users/*.conf;
 }
 NGINX_EOF
+else
+  # Authentik 未設定 → 認証なしのシンプルな設定
+  warn "AUTHENTIK_URL が未設定のため nginx は認証なしで起動します"
+  cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
+# DevBox Platform - 認証なし設定（install.sh が生成）
+# Authentik を設定した後は sudo bash scripts/install.sh を再実行してください
+server {
+    listen 80;
+    server_name _;
 
-nginx -t && systemctl start nginx
-ok "nginx 設定完了"
+    location = / {
+        return 200 "DevBox Platform\n";
+        add_header Content-Type text/plain;
+    }
+
+    include /etc/nginx/conf.d/devbox-users/*.conf;
+}
+NGINX_EOF
+fi
+
+nginx -t && systemctl start nginx && ok "nginx 設定完了" || die "nginx 設定に失敗しました"
 
 # ─── 12. Authentik アプリケーション登録（任意） ──────────────────────────────
 if [[ -n "${AUTHENTIK_TOKEN:-}" ]]; then

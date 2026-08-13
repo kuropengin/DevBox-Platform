@@ -18,6 +18,9 @@ DEVBOX_DIR="/opt/devbox"
 VSCODE_PORT_BASE=10000
 XPRA_PORT_BASE=14500
 
+# platform.conf が存在すれば設定を読み込む
+[[ -f /etc/devbox/platform.conf ]] && source /etc/devbox/platform.conf
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -103,27 +106,27 @@ ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpr
 info "nginx 設定を追加中..."
 mkdir -p /etc/nginx/conf.d/devbox-users
 
-cat > "/etc/nginx/conf.d/devbox-users/${USERNAME}.conf" << NGINX_EOF
-# DevBox nginx config for ${USERNAME} - adduser.sh が生成
-
-# ポータル
-location /${USERNAME}/ {
-    auth_request      /outpost.goauthentik.io/auth/nginx;
+# Authentik 有効時は auth_request ブロックを含める
+if [[ "${AUTHENTIK_ENABLED:-no}" == "yes" ]]; then
+  AUTH_BLOCK='    auth_request      /outpost.goauthentik.io/auth/nginx;
     error_page 401  = @goauthentik_proxy_signin;
-    auth_request_set  \$auth_cookie \$upstream_http_set_cookie;
-    add_header        Set-Cookie \$auth_cookie;
+    auth_request_set  $auth_cookie $upstream_http_set_cookie;
+    add_header        Set-Cookie $auth_cookie;'
+else
+  AUTH_BLOCK=''
+fi
 
+cat > "/etc/nginx/conf.d/devbox-users/${USERNAME}.conf" << NGINX_EOF
+# DevBox nginx config for ${USERNAME}
+
+location /${USERNAME}/ {
+${AUTH_BLOCK}
     alias   ${DEVBOX_DIR}/portal/;
     try_files \$uri ${DEVBOX_DIR}/portal/index.html;
 }
 
-# VS Code
 location /${USERNAME}/vscode/ {
-    auth_request      /outpost.goauthentik.io/auth/nginx;
-    error_page 401  = @goauthentik_proxy_signin;
-    auth_request_set  \$auth_cookie \$upstream_http_set_cookie;
-    add_header        Set-Cookie \$auth_cookie;
-
+${AUTH_BLOCK}
     proxy_pass         http://127.0.0.1:${VSCODE_PORT}/;
     proxy_http_version 1.1;
     proxy_set_header   Upgrade \$http_upgrade;
@@ -133,13 +136,8 @@ location /${USERNAME}/vscode/ {
     proxy_read_timeout 86400;
 }
 
-# Xpra GUI
 location /${USERNAME}/gui/ {
-    auth_request      /outpost.goauthentik.io/auth/nginx;
-    error_page 401  = @goauthentik_proxy_signin;
-    auth_request_set  \$auth_cookie \$upstream_http_set_cookie;
-    add_header        Set-Cookie \$auth_cookie;
-
+${AUTH_BLOCK}
     proxy_pass         http://127.0.0.1:${XPRA_PORT}/;
     proxy_http_version 1.1;
     proxy_set_header   Upgrade \$http_upgrade;
