@@ -1,0 +1,6 @@
+[Unit]
+Description=DevBox for %i
+Documentation=https://github.com/your-org/devbox-platform
+
+[Install]
+WantedBy=multi-user.target

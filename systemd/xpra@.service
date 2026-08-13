@@ -1,0 +1,34 @@
+[Unit]
+Description=Xpra HTML5 Desktop for %i
+PartOf=devbox@%i.target
+After=devbox@%i.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+EnvironmentFile=/etc/devbox/users/%i.conf
+WorkingDirectory=/home/%i
+Environment=HOME=/home/%i
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+ExecStart=/usr/bin/xpra start :$XPRA_DISPLAY \
+    --bind-tcp=127.0.0.1:$XPRA_PORT \
+    --html=on \
+    --start=xfce4-session \
+    --exit-with-children=yes \
+    --daemon=no \
+    --mdns=no \
+    --webcam=no \
+    --notifications=no \
+    --speaker=no \
+    --microphone=no
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# リソース制限はドロップイン /etc/systemd/system/xpra@username.service.d/resources.conf で設定
+# CPUQuota=200%
+# MemoryMax=4G
+
+[Install]
+WantedBy=devbox@%i.target
