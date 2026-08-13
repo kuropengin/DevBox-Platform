@@ -11,6 +11,8 @@ EnvironmentFile=/etc/devbox/users/%i.conf
 WorkingDirectory=/home/%i
 Environment=HOME=/home/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+# ユーザーの実行時ディレクトリを作成
+ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/%U && chmod 700 /run/user/%U && chown %i:%i /run/user/%U'
 ExecStart=/usr/bin/xpra start :$XPRA_DISPLAY \
     --bind-tcp=127.0.0.1:$XPRA_PORT \
     --html=on \

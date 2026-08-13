@@ -99,6 +99,7 @@ EOF
 done
 
 systemctl daemon-reload
+loginctl enable-linger "$USERNAME"
 systemctl enable --now "devbox@${USERNAME}.target"
 ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpra@${USERNAME})"
 

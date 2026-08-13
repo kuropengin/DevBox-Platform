@@ -11,6 +11,9 @@ EnvironmentFile=/etc/devbox/users/%i.conf
 WorkingDirectory=/home/%i
 Environment=HOME=/home/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+# ユーザーの実行時ディレクトリと設定ディレクトリを作成
+ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/%U && chmod 700 /run/user/%U && chown %i:%i /run/user/%U'
+ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.vscode/{cli-data,server-data,user-data,extensions}'
 ExecStart=/usr/bin/code serve-web \
     --host 127.0.0.1 \
     --port $VSCODE_PORT \
