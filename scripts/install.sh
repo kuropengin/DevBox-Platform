@@ -113,7 +113,7 @@ ok "nginx 準備完了: $(nginx -v 2>&1)"
 # ─── 6. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
 if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
   info "SELinux ポリシーを設定中..."
-  setsebool -P httpd_can_network_connect 1
+  setsebool -P httpd_can_network_connect 1 || warn "setsebool に失敗しました（続行します）"
   ok "SELinux: httpd_can_network_connect 有効"
 fi
 
@@ -133,8 +133,12 @@ mkdir -p \
   /etc/devbox/users \
   /etc/nginx/conf.d/devbox-users
 
-# SELinux コンテキストを nginx 向けに設定
-command -v chcon &>/dev/null && chcon -Rt httpd_sys_content_t "${DEVBOX_DIR}/portal"
+# SELinux コンテキストを nginx 向けに設定（xattr 非対応 FS では無視）
+if command -v restorecon &>/dev/null; then
+  restorecon -Rv "${DEVBOX_DIR}/portal" 2>/dev/null || true
+elif command -v chcon &>/dev/null; then
+  chcon -Rt httpd_sys_content_t "${DEVBOX_DIR}/portal" 2>/dev/null || true
+fi
 ok "ディレクトリ作成完了"
 
 # ─── 9. ポータル HTML ─────────────────────────────────────────────────────────
