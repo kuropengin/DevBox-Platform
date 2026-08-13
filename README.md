@@ -1,6 +1,6 @@
 # DevBox Platform
 
-Ubuntu Server で VS Code + Linux デスクトップ環境を手軽に提供するプラットフォームです。
+RHEL9 で VS Code + Linux デスクトップ環境を手軽に提供するプラットフォームです。
 
 ## 構成
 
@@ -47,6 +47,7 @@ sudo -E bash scripts/install.sh
 ```
 
 install.sh が行うこと:
+
 - EPEL リポジトリ追加・CRB 有効化
 - nginx / VS Code（Microsoft rpm リポジトリ）/ Xpra / xpra-html5 / XFCE のインストール
 - SELinux: `httpd_can_network_connect` を有効化
@@ -63,6 +64,7 @@ sudo bash scripts/adduser.sh tanaka --cpu 400% --mem 8G
 ```
 
 adduser.sh が行うこと:
+
 - Linux ユーザー作成
 - UID からポートを自動割り当て（VS Code: 10000+、Xpra: 14500+）
 - `/etc/devbox/users/[username].conf` にポート設定を書き込み
@@ -97,20 +99,20 @@ journalctl -u xpra@yamada.service -f
 
 ## ポート割り当てルール
 
+
 | UID  | VS Code ポート | Xpra ポート | Xpra ディスプレイ |
-|------|---------------|------------|------------------|
-| 1000 | 10000         | 14500      | :100             |
-| 1001 | 10001         | 14501      | :101             |
-| 1002 | 10002         | 14502      | :102             |
+| ---- | -------------- | ----------- | ----------------- |
+| 1000 | 10000          | 14500       | :100              |
+| 1001 | 10001          | 14501       | :101              |
+| 1002 | 10002          | 14502       | :102              |
 
 ## Authentik 設定
 
-1. Authentik 管理画面 → **Providers** → 新規 Proxy Provider  
-   - Mode: `Forward auth (single application)`  
+1. Authentik 管理画面 → **Providers** → 新規 Proxy Provider
+
+   - Mode: `Forward auth (single application)`
    - External Host: `http://devbox.example.com`
-
 2. **Applications** で作成したプロバイダーにアプリを紐付け
-
 3. **Outpost** に Embedded Outpost を割り当て
 
 詳細: https://docs.goauthentik.io/docs/providers/proxy/forward_auth
