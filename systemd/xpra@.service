@@ -11,10 +11,10 @@ EnvironmentFile=/etc/devbox/users/%i.conf
 WorkingDirectory=/home/%i
 Environment=HOME=/home/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-Environment=DISPLAY=:$XPRA_DISPLAY
 ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.xpra /home/%i/.config/xpra'
-ExecStart=/usr/bin/xpra start :$XPRA_DISPLAY \
-    --bind-tcp=127.0.0.1:$XPRA_PORT \
+ExecStart=/bin/bash -c '\
+  exec /usr/bin/xpra start :${XPRA_DISPLAY} \
+    --bind-tcp=127.0.0.1:${XPRA_PORT} \
     --html=on \
     --start=xfce4-session \
     --exit-with-children=no \
@@ -25,7 +25,7 @@ ExecStart=/usr/bin/xpra start :$XPRA_DISPLAY \
     --speaker=no \
     --microphone=no \
     --xvfb=/usr/bin/Xvfb \
-    --socket-dir=/home/%i/.xpra
+    --socket-dir=/home/%i/.xpra'
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
