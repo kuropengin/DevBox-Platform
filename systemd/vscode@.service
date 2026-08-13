@@ -11,25 +11,19 @@ EnvironmentFile=/etc/devbox/users/%i.conf
 WorkingDirectory=/home/%i
 Environment=HOME=/home/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-# ユーザーの実行時ディレクトリと設定ディレクトリを作成
-ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/%U && chmod 700 /run/user/%U && chown %i:%i /run/user/%U'
-ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.vscode/{cli-data,server-data,user-data,extensions}'
+ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.vscode/cli-data /home/%i/.vscode/server-data'
 ExecStart=/usr/bin/code serve-web \
     --host 127.0.0.1 \
     --port $VSCODE_PORT \
     --without-connection-token \
     --accept-server-license-terms \
     --cli-data-dir /home/%i/.vscode/cli-data \
-    --server-data-dir /home/%i/.vscode/server-data \
-    --user-data-dir /home/%i/.vscode/user-data \
-    --extensions-dir /home/%i/.vscode/extensions
+    --server-data-dir /home/%i/.vscode/server-data
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10s
 
 # リソース制限はドロップイン /etc/systemd/system/vscode@username.service.d/resources.conf で設定
-# CPUQuota=200%
-# MemoryMax=4G
 
 [Install]
 WantedBy=devbox@%i.target
