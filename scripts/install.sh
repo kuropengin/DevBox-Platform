@@ -172,7 +172,7 @@ if [[ "$AUTHENTIK_ENABLED" == "yes" ]]; then
 # DevBox Platform - メインサーバー設定（install.sh が生成）
 server {
     listen 80;
-    server_name _;
+    server_name ${DOMAIN};
 
     location /outpost.goauthentik.io {
         proxy_pass              ${AUTHENTIK_URL}/outpost.goauthentik.io;
@@ -203,10 +203,10 @@ else
   warn "AUTHENTIK_URL が未設定のため nginx は認証なしで起動します"
   cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - 認証なし設定（install.sh が生成）
-# Authentik を設定した後は sudo bash scripts/install.sh を再実行してください
+# Authentik を設定した後は AUTHENTIK_URL=... を設定して sudo bash scripts/install.sh を再実行
 server {
     listen 80;
-    server_name _;
+    server_name ${DOMAIN};
 
     location = / {
         return 200 "DevBox Platform\n";

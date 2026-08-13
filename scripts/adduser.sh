@@ -122,7 +122,7 @@ cat > "/etc/nginx/conf.d/devbox-users/${USERNAME}.conf" << NGINX_EOF
 location /${USERNAME}/ {
 ${AUTH_BLOCK}
     alias   ${DEVBOX_DIR}/portal/;
-    try_files \$uri ${DEVBOX_DIR}/portal/index.html;
+    index   index.html;
 }
 
 location /${USERNAME}/vscode/ {
