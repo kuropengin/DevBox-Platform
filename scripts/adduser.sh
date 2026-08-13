@@ -100,7 +100,11 @@ done
 
 systemctl daemon-reload
 loginctl enable-linger "$USERNAME"
-systemctl enable --now "devbox@${USERNAME}.target"
+# 子サービスを個別に enable してから target を起動する
+systemctl enable --now \
+  "vscode@${USERNAME}.service" \
+  "xpra@${USERNAME}.service" \
+  "devbox@${USERNAME}.target"
 ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpra@${USERNAME})"
 
 # ─── 5. nginx 設定追加 ─────────────────────────────────────────────────────────
