@@ -40,30 +40,40 @@ DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 # ─── Authentik セットアップ関数（ネイティブインストール） ────────────────────────
 
 setup_authentik() {
-  info "Authentik を直接インストール中..."
+  info "Authentik をソースビルドでインストール中..."
 
   mkdir -p /etc/devbox /etc/devbox/users
+
+  # ─── 依存パッケージ ──────────────────────────────────────────────────────────
   dnf install -y \
     postgresql-server postgresql-contrib \
     python3.12 python3.12-devel \
     redis \
     gcc openssl-devel libpq-devel \
-    openldap-devel cyrus-sasl-devel libffi-devel
+    openldap-devel cyrus-sasl-devel libffi-devel \
+    git
 
-  # PostgreSQL 初期化（初回のみ）
+  # Node.js 20 のインストール（フロントエンドビルドに必要）
+  if ! command -v node &>/dev/null || [[ $(node --version 2>/dev/null | tr -d 'v' | cut -d. -f1) -lt 20 ]]; then
+    info "Node.js 20 をインストール中..."
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+    dnf install -y nodejs
+  fi
+  ok "Node.js $(node --version) インストール完了"
+
+  # ─── PostgreSQL ───────────────────────────────────────────────────────────────
   if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
     info "PostgreSQL を初期化中..."
     postgresql-setup --initdb
   fi
   systemctl enable --now postgresql
 
-  # pg_hba.conf にローカル接続のパスワード認証を追加（idempotent）
   local hba=/var/lib/pgsql/data/pg_hba.conf
   grep -q 'authentik' "$hba" || \
     sed -i '/^local\s*all\s*all/i local   authentik   authentik   md5\nhost    authentik   authentik   127.0.0.1/32   md5' "$hba"
   systemctl reload postgresql 2>/dev/null || systemctl restart postgresql
 
-  # 認証情報の生成（初回のみ）
+  # ─── 認証情報の生成（初回のみ） ──────────────────────────────────────────────
   if [[ ! -f /etc/devbox/authentik.env ]]; then
     local pg_pass secret_key admin_pass bootstrap_token
     pg_pass=$(openssl rand -hex 16)
@@ -84,31 +94,64 @@ ENV_EOF
   # shellcheck disable=SC1091
   source /etc/devbox/authentik.env
 
-  # PostgreSQL ユーザー・DB 作成（冪等）
+  # ─── PostgreSQL ユーザー・DB ───────────────────────────────────────────────
   sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='authentik'" | grep -q 1 || \
     sudo -u postgres psql -c "CREATE USER authentik WITH PASSWORD '${AUTHENTIK_PG_PASS}';"
   sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='authentik'" | grep -q 1 || \
     sudo -u postgres psql -c "CREATE DATABASE authentik OWNER authentik;"
 
-  # Redis 起動
+  # ─── Redis ────────────────────────────────────────────────────────────────────
   systemctl enable --now redis
 
-  # authentik システムユーザー
+  # ─── authentik システムユーザー ───────────────────────────────────────────────
   id authentik &>/dev/null || useradd -r -d /opt/authentik -s /sbin/nologin authentik
   mkdir -p /opt/authentik
   chown authentik:authentik /opt/authentik
 
-  # Python 仮想環境 + pip install authentik（初回のみ）
+  # ─── Authentik バージョンを取得 ───────────────────────────────────────────────
+  local version
+  version=$(curl -sf https://api.github.com/repos/goauthentik/authentik/releases/latest \
+    | python3 -c "import sys,json; tag=json.load(sys.stdin)['tag_name']; print(tag.replace('version/',''))" 2>/dev/null || echo "")
+  [[ -z "$version" ]] && die "Authentik リリースバージョンの取得に失敗しました"
+  info "Authentik ${version} をビルド中..."
+
+  local build_dir="/opt/authentik-src-${version}"
+
+  # ─── ソースクローン（初回のみ） ───────────────────────────────────────────────
+  if [[ ! -d "$build_dir/.git" ]]; then
+    info "ソースコードをクローン中（時間がかかります）..."
+    git clone --depth=1 --branch "version/${version}" \
+      https://github.com/goauthentik/authentik.git "$build_dir"
+  fi
+
+  # ─── フロントエンドビルド ─────────────────────────────────────────────────────
+  if [[ ! -d "${build_dir}/web/dist" ]]; then
+    info "フロントエンドをビルド中（npm、数分かかります）..."
+    cd "${build_dir}/web"
+    npm ci --no-audit --prefer-offline 2>&1 | tail -3
+    npm run build 2>&1 | tail -5
+    cd /
+    ok "フロントエンドビルド完了"
+  fi
+
+  # ─── Python venv + インストール ───────────────────────────────────────────────
   if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
-    info "Authentik Python パッケージをインストール中（時間がかかる場合があります）..."
+    info "Python 仮想環境をセットアップ中..."
     sudo -u authentik python3.12 -m venv /opt/authentik/venv
     sudo -u authentik /opt/authentik/venv/bin/pip install --upgrade pip --quiet
-    sudo -u authentik /opt/authentik/venv/bin/pip install authentik --quiet
+
+    info "Authentik をインストール中（pip、数分かかります）..."
+    # ソースディレクトリからインストール（web/dist が package_data として含まれる）
+    cd "$build_dir"
+    sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet ".[postgresql]" || \
+      sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet .
+    cd /
+    ok "Authentik Python インストール完了"
   else
     ok "Authentik は導入済み"
   fi
 
-  # サービス用環境ファイルを生成
+  # ─── 環境ファイルを生成 ───────────────────────────────────────────────────────
   cat > /opt/authentik/.env << ENV_EOF
 AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
 AUTHENTIK_POSTGRESQL__HOST=localhost
@@ -124,11 +167,11 @@ ENV_EOF
   chown authentik:authentik /opt/authentik/.env
   chmod 600 /opt/authentik/.env
 
-  # データベースマイグレーション
+  # ─── マイグレーション ─────────────────────────────────────────────────────────
   info "データベースマイグレーションを実行中..."
   sudo -u authentik /opt/authentik/venv/bin/ak migrate
 
-  # systemd サービスを登録
+  # ─── systemd サービス ─────────────────────────────────────────────────────────
   cat > /etc/systemd/system/authentik-server.service << UNIT_EOF
 [Unit]
 Description=Authentik Server
@@ -173,13 +216,12 @@ UNIT_EOF
   systemctl daemon-reload
   systemctl enable --now authentik-server authentik-worker
 
-  # firewalld に Authentik ポートを追加
   if systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port=9000/tcp 2>/dev/null || true
     firewall-cmd --reload 2>/dev/null || true
   fi
 
-  # 起動待機（最大 5 分）
+  # ─── 起動待機（最大 5 分） ────────────────────────────────────────────────────
   info "Authentik の起動を待機中（最大 5 分）..."
   local ready=false
   for i in $(seq 1 60); do
