@@ -42,7 +42,7 @@ DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 setup_authentik() {
   info "Authentik を直接インストール中..."
 
-  # PostgreSQL, Redis, Python 3.12, ビルド依存パッケージ
+  mkdir -p /etc/devbox /etc/devbox/users
   dnf install -y \
     postgresql-server postgresql-contrib \
     python3.12 python3.12-devel \
