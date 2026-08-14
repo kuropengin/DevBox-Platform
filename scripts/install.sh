@@ -47,7 +47,7 @@ setup_authentik() {
   # ─── 依存パッケージ ──────────────────────────────────────────────────────────
   dnf install -y \
     postgresql-server postgresql-contrib \
-    python3.12 python3.12-devel \
+    python3.14 python3.14-devel \
     redis \
     gcc openssl-devel libpq-devel \
     openldap-devel cyrus-sasl-devel libffi-devel \
@@ -108,10 +108,11 @@ ENV_EOF
   mkdir -p /opt/authentik
   chown authentik:authentik /opt/authentik
 
-  # ─── Authentik バージョンを取得 ───────────────────────────────────────────────
-  local version
+  # ─── Authentik バージョンを取得（最新安定版） ────────────────────────────────
+  local version py_cmd
+  py_cmd="python3.14"
   version=$(curl -sf https://api.github.com/repos/goauthentik/authentik/releases/latest \
-    | python3 -c "import sys,json; tag=json.load(sys.stdin)['tag_name']; print(tag.replace('version/',''))" 2>/dev/null || echo "")
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].replace('version/',''))" 2>/dev/null || echo "")
   [[ -z "$version" ]] && die "Authentik リリースバージョンの取得に失敗しました"
   info "Authentik ${version} をビルド中..."
 
@@ -137,7 +138,7 @@ ENV_EOF
   # ─── Python venv + インストール ───────────────────────────────────────────────
   if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
     info "Python 仮想環境をセットアップ中..."
-    sudo -u authentik python3.12 -m venv /opt/authentik/venv
+    sudo -u authentik "${py_cmd}" -m venv /opt/authentik/venv
     sudo -u authentik /opt/authentik/venv/bin/pip install --upgrade pip --quiet
 
     info "Authentik をインストール中（pip、数分かかります）..."
