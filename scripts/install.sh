@@ -138,17 +138,20 @@ ENV_EOF
   # ─── Python venv + インストール ───────────────────────────────────────────────
   if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
     info "Python 仮想環境をセットアップ中..."
-    sudo -u authentik "${py_cmd}" -m venv /opt/authentik/venv
+    python3.14 -m venv /opt/authentik/venv
 
-    # uv をインストール（Authentik は uv 依存管理を前提としており、[tool.uv.sources] でプライベートパッケージを解決する）
+    # uv をシステムにインストール（root で実行することで build_dir の権限問題を回避）
     info "uv をインストール中..."
-    sudo -u authentik /opt/authentik/venv/bin/pip install uv --quiet
+    pip3.14 install uv --quiet
 
     info "Authentik をインストール中（uv sync、数分かかります）..."
-    sudo -u authentik bash -c "
-      cd '${build_dir}'
-      VIRTUAL_ENV=/opt/authentik/venv /opt/authentik/venv/bin/uv sync --no-dev
-    "
+    # UV_PROJECT_ENVIRONMENT で既存 venv を指定（VIRTUAL_ENV は新 uv では無視される）
+    cd "$build_dir"
+    UV_PROJECT_ENVIRONMENT=/opt/authentik/venv uv sync --no-dev
+    cd /
+
+    # venv の所有権を authentik ユーザーに変更
+    chown -R authentik:authentik /opt/authentik/venv
     ok "Authentik Python インストール完了"
   else
     ok "Authentik は導入済み"
