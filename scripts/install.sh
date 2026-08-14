@@ -22,6 +22,21 @@ ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
+# .env ファイルが存在すれば読み込む（環境変数を上書き）
+for env_path in "${REPO_DIR}/install.env" "${SCRIPT_DIR}/install.env" "/etc/devbox/install.env"; do
+  if [[ -f "$env_path" ]]; then
+    info ".env を読み込み中: ${env_path}"
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_path"
+    set +a
+    break
+  fi
+done
+
+# .env を読み込んだ後に DOMAIN を再評価
+DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
+
 # ─── Authentik セットアップ関数（ネイティブインストール） ────────────────────────
 
 setup_authentik() {
