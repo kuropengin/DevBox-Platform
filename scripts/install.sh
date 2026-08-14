@@ -51,6 +51,7 @@ setup_authentik() {
     redis \
     gcc openssl-devel libpq-devel \
     openldap-devel cyrus-sasl-devel libffi-devel \
+    krb5-devel \
     git
 
   # Node.js 20 のインストール（フロントエンドビルドに必要）
