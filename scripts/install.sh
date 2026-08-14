@@ -140,14 +140,14 @@ ENV_EOF
     info "Python 仮想環境をセットアップ中..."
     python3.14 -m venv /opt/authentik/venv
 
-    # uv をシステムにインストール（root で実行することで build_dir の権限問題を回避）
+    # venv の pip で uv をインストールし、venv 内の uv を使用
     info "uv をインストール中..."
-    pip3.14 install uv --quiet
+    /opt/authentik/venv/bin/pip install uv --quiet
 
     info "Authentik をインストール中（uv sync、数分かかります）..."
     # UV_PROJECT_ENVIRONMENT で既存 venv を指定（VIRTUAL_ENV は新 uv では無視される）
     cd "$build_dir"
-    UV_PROJECT_ENVIRONMENT=/opt/authentik/venv uv sync --no-dev
+    UV_PROJECT_ENVIRONMENT=/opt/authentik/venv /opt/authentik/venv/bin/uv sync --no-dev
     cd /
 
     # venv の所有権を authentik ユーザーに変更
