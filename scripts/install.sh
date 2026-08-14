@@ -139,16 +139,16 @@ ENV_EOF
   if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
     info "Python 仮想環境をセットアップ中..."
     sudo -u authentik "${py_cmd}" -m venv /opt/authentik/venv
-    sudo -u authentik /opt/authentik/venv/bin/pip install --upgrade pip --quiet
 
-    info "Authentik をインストール中（pip、数分かかります）..."
-    # ak-guardian 等の独自パッケージは Authentik の専用インデックスから取得
-    sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet \
-      --extra-index-url https://authentik.packages.beryju.org/simple/ \
-      ".[postgresql]" || \
-      sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet \
-        --extra-index-url https://authentik.packages.beryju.org/simple/ \
-        .
+    # uv をインストール（Authentik は uv 依存管理を前提としており、[tool.uv.sources] でプライベートパッケージを解決する）
+    info "uv をインストール中..."
+    sudo -u authentik /opt/authentik/venv/bin/pip install uv --quiet
+
+    info "Authentik をインストール中（uv sync、数分かかります）..."
+    sudo -u authentik bash -c "
+      cd '${build_dir}'
+      VIRTUAL_ENV=/opt/authentik/venv /opt/authentik/venv/bin/uv sync --no-dev
+    "
     ok "Authentik Python インストール完了"
   else
     ok "Authentik は導入済み"
