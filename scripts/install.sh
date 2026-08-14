@@ -22,76 +22,146 @@ ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# ─── Authentik セットアップ関数 ────────────────────────────────────────────────
+# ─── Authentik セットアップ関数（ネイティブインストール） ────────────────────────
 
 setup_authentik() {
-  # Podman のインストール確認
-  if ! command -v podman &>/dev/null; then
-    info "Podman をインストール中..."
-    dnf install -y podman
+  info "Authentik を直接インストール中..."
+
+  # PostgreSQL, Redis, Python 3.12, ビルド依存パッケージ
+  dnf install -y \
+    postgresql-server postgresql-contrib \
+    python3.12 python3.12-devel \
+    redis \
+    gcc openssl-devel libpq-devel \
+    openldap-devel cyrus-sasl-devel libffi-devel
+
+  # PostgreSQL 初期化（初回のみ）
+  if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
+    info "PostgreSQL を初期化中..."
+    postgresql-setup --initdb
   fi
+  systemctl enable --now postgresql
 
-  # podman-compose のインストール確認
-  if ! command -v podman-compose &>/dev/null; then
-    info "podman-compose をインストール中..."
-    dnf install -y python3-pip
-    pip3 install -q podman-compose
-  fi
+  # pg_hba.conf にローカル接続のパスワード認証を追加（idempotent）
+  local hba=/var/lib/pgsql/data/pg_hba.conf
+  grep -q 'authentik' "$hba" || \
+    sed -i '/^local\s*all\s*all/i local   authentik   authentik   md5\nhost    authentik   authentik   127.0.0.1/32   md5' "$hba"
+  systemctl reload postgresql 2>/dev/null || systemctl restart postgresql
 
-  mkdir -p "$AUTHENTIK_DIR"
-
-  # 初回のみ認証情報を生成
-  if [[ ! -f "${AUTHENTIK_DIR}/.env" ]]; then
+  # 認証情報の生成（初回のみ）
+  if [[ ! -f /etc/devbox/authentik.env ]]; then
     local pg_pass secret_key admin_pass bootstrap_token
     pg_pass=$(openssl rand -hex 16)
     secret_key=$(openssl rand -hex 32)
     admin_pass="${AUTHENTIK_ADMIN_PASSWORD:-$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)}"
     bootstrap_token=$(openssl rand -hex 32)
 
-    cat > "${AUTHENTIK_DIR}/.env" << ENV_EOF
-COMPOSE_PROJECT_NAME=authentik
-PG_PASS=${pg_pass}
+    cat > /etc/devbox/authentik.env << ENV_EOF
+AUTHENTIK_PG_PASS=${pg_pass}
 AUTHENTIK_SECRET_KEY=${secret_key}
 AUTHENTIK_BOOTSTRAP_EMAIL=admin@${DOMAIN}
 AUTHENTIK_BOOTSTRAP_PASSWORD=${admin_pass}
 AUTHENTIK_BOOTSTRAP_TOKEN=${bootstrap_token}
+ENV_EOF
+    chmod 600 /etc/devbox/authentik.env
+  fi
+
+  # shellcheck disable=SC1091
+  source /etc/devbox/authentik.env
+
+  # PostgreSQL ユーザー・DB 作成（冪等）
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='authentik'" | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE USER authentik WITH PASSWORD '${AUTHENTIK_PG_PASS}';"
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='authentik'" | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE DATABASE authentik OWNER authentik;"
+
+  # Redis 起動
+  systemctl enable --now redis
+
+  # authentik システムユーザー
+  id authentik &>/dev/null || useradd -r -d /opt/authentik -s /sbin/nologin authentik
+  mkdir -p /opt/authentik
+  chown authentik:authentik /opt/authentik
+
+  # Python 仮想環境 + pip install authentik（初回のみ）
+  if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
+    info "Authentik Python パッケージをインストール中（時間がかかる場合があります）..."
+    sudo -u authentik python3.12 -m venv /opt/authentik/venv
+    sudo -u authentik /opt/authentik/venv/bin/pip install --upgrade pip --quiet
+    sudo -u authentik /opt/authentik/venv/bin/pip install authentik --quiet
+  else
+    ok "Authentik は導入済み"
+  fi
+
+  # サービス用環境ファイルを生成
+  cat > /opt/authentik/.env << ENV_EOF
+AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
+AUTHENTIK_POSTGRESQL__HOST=localhost
+AUTHENTIK_POSTGRESQL__NAME=authentik
+AUTHENTIK_POSTGRESQL__USER=authentik
+AUTHENTIK_POSTGRESQL__PASSWORD=${AUTHENTIK_PG_PASS}
+AUTHENTIK_REDIS__HOST=localhost
+AUTHENTIK_BOOTSTRAP_EMAIL=${AUTHENTIK_BOOTSTRAP_EMAIL}
+AUTHENTIK_BOOTSTRAP_PASSWORD=${AUTHENTIK_BOOTSTRAP_PASSWORD}
+AUTHENTIK_BOOTSTRAP_TOKEN=${AUTHENTIK_BOOTSTRAP_TOKEN}
 AUTHENTIK_ERROR_REPORTING__ENABLED=false
 ENV_EOF
-    chmod 600 "${AUTHENTIK_DIR}/.env"
-  fi
+  chown authentik:authentik /opt/authentik/.env
+  chmod 600 /opt/authentik/.env
 
-  # docker-compose.yml をダウンロード（初回のみ）
-  if [[ ! -f "${AUTHENTIK_DIR}/docker-compose.yml" ]]; then
-    info "Authentik の docker-compose.yml をダウンロード中..."
-    curl -fsSL https://goauthentik.io/docker-compose.yml \
-      -o "${AUTHENTIK_DIR}/docker-compose.yml"
-  fi
+  # データベースマイグレーション
+  info "データベースマイグレーションを実行中..."
+  sudo -u authentik /opt/authentik/venv/bin/ak migrate
 
-  # Authentik 起動（冪等）
-  info "Authentik コンテナを起動中..."
-  cd "$AUTHENTIK_DIR"
-  podman-compose --env-file .env up -d
-
-  # systemd 起動時自動起動の設定
-  if [[ ! -f /etc/systemd/system/authentik.service ]]; then
-    cat > /etc/systemd/system/authentik.service << UNIT_EOF
+  # systemd サービスを登録
+  cat > /etc/systemd/system/authentik-server.service << UNIT_EOF
 [Unit]
-Description=Authentik Identity Provider
-After=network.target
+Description=Authentik Server
+After=postgresql.service redis.service
+Requires=postgresql.service redis.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=${AUTHENTIK_DIR}
-ExecStart=/usr/bin/podman-compose --env-file .env up -d
-ExecStop=/usr/bin/podman-compose --env-file .env down
-TimeoutStartSec=300
+Type=simple
+User=authentik
+Group=authentik
+WorkingDirectory=/opt/authentik
+EnvironmentFile=/opt/authentik/.env
+ExecStart=/opt/authentik/venv/bin/ak server
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
-    systemctl daemon-reload
-    systemctl enable authentik.service
+
+  cat > /etc/systemd/system/authentik-worker.service << UNIT_EOF
+[Unit]
+Description=Authentik Worker
+After=authentik-server.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=authentik
+Group=authentik
+WorkingDirectory=/opt/authentik
+EnvironmentFile=/opt/authentik/.env
+ExecStart=/opt/authentik/venv/bin/ak worker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+  systemctl daemon-reload
+  systemctl enable --now authentik-server authentik-worker
+
+  # firewalld に Authentik ポートを追加
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-port=9000/tcp 2>/dev/null || true
+    firewall-cmd --reload 2>/dev/null || true
   fi
 
   # 起動待機（最大 5 分）
@@ -106,89 +176,18 @@ UNIT_EOF
 
   if [[ "$ready" == "false" ]]; then
     warn "Authentik の起動がタイムアウトしました"
-    warn "  cd /opt/authentik && podman-compose ps"
+    warn "  journalctl -u authentik-server -n 50 --no-pager"
     return 1
   fi
 
   ok "Authentik 起動完了"
-
-  # Bootstrap Token で API 設定
-  local token
-  token=$(grep AUTHENTIK_BOOTSTRAP_TOKEN "${AUTHENTIK_DIR}/.env" | cut -d= -f2)
-  configure_authentik_api "$token" && ok "Authentik API 設定完了" || warn "Authentik API 設定に失敗しました。手動で設定してください"
-
-  # firewalld に Authentik ポートを追加（外部公開する場合）
-  if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-port=9000/tcp 2>/dev/null || true
-    firewall-cmd --reload 2>/dev/null || true
-  fi
-
-  local admin_email admin_pass_val
-  admin_email=$(grep AUTHENTIK_BOOTSTRAP_EMAIL "${AUTHENTIK_DIR}/.env" | cut -d= -f2)
-  admin_pass_val=$(grep AUTHENTIK_BOOTSTRAP_PASSWORD "${AUTHENTIK_DIR}/.env" | cut -d= -f2)
+  configure_authentik_api "${AUTHENTIK_BOOTSTRAP_TOKEN}" && ok "Authentik API 設定完了" || warn "Authentik API 設定に失敗しました"
 
   echo ""
   echo -e "  ${CYAN}Authentik 管理画面${NC}: http://${DOMAIN}:9000"
-  echo -e "  ${CYAN}Email${NC}    : ${admin_email}"
-  echo -e "  ${CYAN}Password${NC} : ${admin_pass_val}"
-  echo    "  ※ 認証情報は ${AUTHENTIK_DIR}/.env に保存されています"
-}
-
-configure_authentik_api() {
-  local token="$1"
-  local base="http://127.0.0.1:9000/api/v3"
-  local headers=(-H "Authorization: Bearer ${token}" -H "Content-Type: application/json")
-
-  # 認可フロー PK を取得
-  local flow_pk
-  flow_pk=$(curl -sf "${headers[@]}" \
-    "${base}/flows/instances/?slug=default-provider-authorization-implicit-consent" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['pk'] if d.get('count',0)>0 else '')" 2>/dev/null || echo "")
-
-  [[ -z "$flow_pk" ]] && { warn "Authentik フローが見つかりません"; return 1; }
-
-  # 既存プロバイダーの確認
-  local existing_pk
-  existing_pk=$(curl -sf "${headers[@]}" \
-    "${base}/providers/proxy/?name=devbox-proxy" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['pk'] if d.get('count',0)>0 else '')" 2>/dev/null || echo "")
-
-  local provider_pk
-  if [[ -n "$existing_pk" ]]; then
-    provider_pk="$existing_pk"
-  else
-    # Proxy Provider 作成
-    provider_pk=$(curl -sf -X POST "${headers[@]}" \
-      -d "{\"name\":\"devbox-proxy\",\"authorization_flow\":\"${flow_pk}\",\"external_host\":\"http://${DOMAIN}\",\"mode\":\"forward_single\"}" \
-      "${base}/providers/proxy/" \
-      | python3 -c "import sys,json; print(json.load(sys.stdin).get('pk',''))" 2>/dev/null || echo "")
-  fi
-
-  [[ -z "$provider_pk" ]] && { warn "プロバイダー作成に失敗しました"; return 1; }
-
-  # Application 作成（既存なら PATCH）
-  local app_exists
-  app_exists=$(curl -sf "${headers[@]}" \
-    "${base}/core/applications/?slug=devbox" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('count',0)>0 else '')" 2>/dev/null || echo "")
-
-  if [[ -z "$app_exists" ]]; then
-    curl -sf -X POST "${headers[@]}" \
-      -d "{\"name\":\"DevBox\",\"slug\":\"devbox\",\"provider\":${provider_pk}}" \
-      "${base}/core/applications/" > /dev/null || warn "アプリケーション作成に失敗"
-  fi
-
-  # Embedded Outpost にプロバイダーを追加
-  local outpost_pk
-  outpost_pk=$(curl -sf "${headers[@]}" \
-    "${base}/outposts/instances/?managed=goauthentik.io/outposts/embedded" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['pk'] if d.get('count',0)>0 else '')" 2>/dev/null || echo "")
-
-  if [[ -n "$outpost_pk" ]]; then
-    curl -sf -X PATCH "${headers[@]}" \
-      -d "{\"providers\":[${provider_pk}]}" \
-      "${base}/outposts/instances/${outpost_pk}/" > /dev/null || warn "Outpost 設定に失敗"
-  fi
+  echo -e "  ${CYAN}Email${NC}    : ${AUTHENTIK_BOOTSTRAP_EMAIL}"
+  echo -e "  ${CYAN}Password${NC} : ${AUTHENTIK_BOOTSTRAP_PASSWORD}"
+  echo    "  ※ 認証情報は /etc/devbox/authentik.env に保存されています"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
