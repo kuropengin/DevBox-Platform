@@ -142,11 +142,13 @@ ENV_EOF
     sudo -u authentik /opt/authentik/venv/bin/pip install --upgrade pip --quiet
 
     info "Authentik をインストール中（pip、数分かかります）..."
-    # ソースディレクトリからインストール（web/dist が package_data として含まれる）
-    cd "$build_dir"
-    sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet ".[postgresql]" || \
-      sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet .
-    cd /
+    # ak-guardian 等の独自パッケージは Authentik の専用インデックスから取得
+    sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet \
+      --extra-index-url https://authentik.packages.beryju.org/simple/ \
+      ".[postgresql]" || \
+      sudo -u authentik /opt/authentik/venv/bin/pip install --no-cache-dir --quiet \
+        --extra-index-url https://authentik.packages.beryju.org/simple/ \
+        .
     ok "Authentik Python インストール完了"
   else
     ok "Authentik は導入済み"
