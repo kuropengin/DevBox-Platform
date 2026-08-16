@@ -6,14 +6,14 @@
 # 環境変数（任意）:
 #   DEVBOX_DOMAIN          例: devbox.example.com  (デフォルト: devbox.example.com)
 #   LLDAP_ADMIN_PASSWORD   初期管理者パスワード（未設定時は自動生成）
-#   SKIP_LLDAP=yes         LLDAP のセットアップをスキップ
+#   SKIP_LLDAP=yes         LLDAP / LemonLDAP::NG のセットアップをスキップ
 
 set -euo pipefail
 
 DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 DEVBOX_DIR="/opt/devbox"
-AUTH_LDAP_DIR="/opt/devbox/auth-ldap"
 LLDAP_BASE_DN="dc=devbox,dc=local"
+LLNG_CLI="/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -38,16 +38,25 @@ done
 # .env を読み込んだ後に DOMAIN を再評価
 DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 
-# ─── LLDAP セットアップ関数（dnf の RPM パッケージ、ビルド不要） ──────────────
+# LemonLDAP::NG は Cookie ドメインに IP アドレスを許可しない（RFC2396 hostname
+# 文法で検証されており、数字だけのラベルは拒否される）。IP を指定された場合は
+# sslip.io（IP をホスト名として解決する公開 DNS）経由のホスト名に変換する。
+if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  warn "DEVBOX_DOMAIN が IP アドレスです。LemonLDAP::NG の制約により sslip.io 経由のホスト名に変換します"
+  DOMAIN="${DOMAIN//./-}.sslip.io"
+  info "実際のアクセス先: http://${DOMAIN}（インターネット経由の DNS 解決が必要です）"
+fi
+
+# ─── LLDAP + LemonLDAP::NG セットアップ（dnf の RPM パッケージ、ビルド不要） ──
 #
 # LLDAP は Fedora/EPEL に公式パッケージが無いため、openSUSE Build Service (OBS)
 # が提供する CentOS 9 Stream 向け非公式ビルド（GPG 署名済み）を dnf リポジトリ
 # として登録して利用する。以後は `dnf update` だけで追随でき、Authentik の
 # ようにアップデートのたびに npm/uv でソースビルドする必要はない。
 #
-# Forward Auth は nginx の auth_request から、LLDAP に対して LDAP bind を行う
-# だけの小さな Python 標準ライブラリ製ブリッジ（auth_ldap.py）で実現する。
-# ldapwhoami は openldap-clients（RHEL 公式パッケージ）を利用する。
+# 認証・認可（ログイン画面、セッション Cookie、nginx Forward Auth）は
+# LemonLDAP::NG（EPEL 公式パッケージ）が担い、LLDAP を LDAP バックエンドとして
+# 利用する。Basic 認証と異なり、専用ログインページとセッション管理を持つ。
 
 setup_lldap() {
   info "LLDAP をインストール中（RPM パッケージ、ビルド不要）..."
@@ -67,7 +76,7 @@ enabled=1
 REPO_EOF
   fi
 
-  dnf install -y lldap lldap-set-password openldap-clients
+  dnf install -y lldap lldap-set-password
 
   # ─── 認証情報の生成（初回のみ） ──────────────────────────────────────────────
   if [[ ! -f /etc/devbox/lldap.env ]]; then
@@ -89,21 +98,17 @@ ENV_EOF
   # shellcheck disable=SC1091
   source /etc/devbox/lldap.env
 
-  # ─── 設定ファイル ─────────────────────────────────────────────────────────────
+  # ─── 設定ファイル（HTTP は localhost のみ。nginx の /lldap/ 経由で公開） ────
   sed -i \
     -e "s|^jwt_secret = .*|jwt_secret = \"${LLDAP_JWT_SECRET}\"|" \
     -e "s|^key_seed = .*|key_seed = \"${LLDAP_KEY_SEED}\"|" \
     -e "s|^ldap_user_pass = .*|ldap_user_pass = \"${LLDAP_ADMIN_PASSWORD}\"|" \
     -e "s|^#ldap_base_dn = .*|ldap_base_dn = \"${LLDAP_BASE_DN}\"|" \
+    -e 's|^#http_host = "0.0.0.0"|http_host = "127.0.0.1"|' \
     /etc/lldap/lldap_config.toml
   chown -R lldap:lldap /etc/lldap
 
   systemctl enable --now lldap
-
-  if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-port=17170/tcp 2>/dev/null || true
-    firewall-cmd --reload 2>/dev/null || true
-  fi
 
   # ─── 起動待機 ─────────────────────────────────────────────────────────────────
   info "LLDAP の起動を待機中..."
@@ -122,74 +127,85 @@ ENV_EOF
   fi
   ok "LLDAP 起動完了"
 
-  setup_auth_ldap || return 1
+  setup_lemonldap || return 1
 
   echo ""
-  echo -e "  ${CYAN}LLDAP 管理画面${NC}: http://${DOMAIN}:17170"
+  echo -e "  ${CYAN}LLDAP 管理画面${NC}: http://${DOMAIN}/lldap/"
   echo -e "  ${CYAN}Admin${NC}    : ${LLDAP_ADMIN_USER}"
   echo -e "  ${CYAN}Password${NC} : ${LLDAP_ADMIN_PASSWORD}"
   echo    "  ※ 認証情報は /etc/devbox/lldap.env に保存されています"
 }
 
-# ─── auth-ldap ブリッジ（nginx auth_request → LDAP bind、単なる Python スクリプト） ──
-setup_auth_ldap() {
-  info "auth-ldap ブリッジをセットアップ中..."
+# ─── LemonLDAP::NG セットアップ（ログイン画面 + Forward Auth、EPEL 公式パッケージ） ──
+setup_lemonldap() {
+  info "LemonLDAP::NG をインストール中（EPEL 公式パッケージ）..."
 
-  mkdir -p "${AUTH_LDAP_DIR}"
-  cp "${REPO_DIR}/scripts/auth-ldap/auth_ldap.py" "${AUTH_LDAP_DIR}/auth_ldap.py"
-
-  id devbox-auth &>/dev/null || useradd -r -d "${AUTH_LDAP_DIR}" -s /sbin/nologin devbox-auth
+  dnf install -y lemonldap-ng lemonldap-ng-fastcgi-server lemonldap-ng-selinux
 
   # shellcheck disable=SC1091
   source /etc/devbox/lldap.env
 
-  cat > "${AUTH_LDAP_DIR}/.env" << ENV_EOF
-LDAP_URL=ldap://127.0.0.1:3890
-LDAP_BASE_DN=${LLDAP_BASE_DN}
-LISTEN_HOST=127.0.0.1
-LISTEN_PORT=9091
-ENV_EOF
-  chmod 600 "${AUTH_LDAP_DIR}/.env"
-  chown -R devbox-auth:devbox-auth "${AUTH_LDAP_DIR}"
+  # ポータル/マネージャーの静的アセットを /_auth/static 配下に変更し、
+  # nginx で LLDAP 用に予約する /static/ と衝突しないようにする。
+  sed -i 's|^staticPrefix = /static$|staticPrefix = /_auth/static|' /etc/lemonldap-ng/lemonldap-ng.ini
 
-  cat > /etc/systemd/system/auth-ldap.service << UNIT_EOF
-[Unit]
-Description=DevBox auth_request -> LDAP (LLDAP) bridge
-After=lldap.service
-Requires=lldap.service
+  local merge_file
+  merge_file="$(mktemp)"
+  # lemonldap-ng-cli は内部で apache ユーザーに権限を落として設定ファイルを
+  # 読むため、root:root 600（mktemp のデフォルト）のままだと権限エラーになる。
+  chmod 644 "$merge_file"
+  cat > "$merge_file" << JSON_EOF
+{
+  "authentication": "LDAP",
+  "userDB": "LDAP",
+  "passwordDB": "LDAP",
+  "registerDB": "Null",
+  "ldapServer": "ldap://127.0.0.1:3890",
+  "ldapBase": "ou=people,${LLDAP_BASE_DN}",
+  "managerDn": "uid=${LLDAP_ADMIN_USER},ou=people,${LLDAP_BASE_DN}",
+  "managerPassword": "${LLDAP_ADMIN_PASSWORD}",
+  "domain": "${DOMAIN}",
+  "portal": "http://${DOMAIN}/_auth/",
+  "staticPrefix": "/_auth/static",
+  "cookieName": "devboxauth",
+  "securedCookie": 0,
+  "notification": 0,
+  "applicationList": {},
+  "locationRules": {
+    "${DOMAIN}": { "default": "accept" }
+  },
+  "exportedVars": {},
+  "groups": {},
+  "macros": {}
+}
+JSON_EOF
 
-[Service]
-Type=simple
-User=devbox-auth
-Group=devbox-auth
-WorkingDirectory=${AUTH_LDAP_DIR}
-EnvironmentFile=${AUTH_LDAP_DIR}/.env
-ExecStart=/usr/bin/python3 ${AUTH_LDAP_DIR}/auth_ldap.py
-Restart=on-failure
-RestartSec=5
+  # 手組みの JSON を restore すると cfgDate 欠落で設定が壊れるため、必ず
+  # merge（既存設定への差分適用、cfgDate 等は自動採番）を使う。
+  if ! "$LLNG_CLI" -yes 1 merge "$merge_file" >/dev/null 2>&1; then
+    rm -f "$merge_file"
+    warn "LemonLDAP::NG の設定投入に失敗しました"
+    return 1
+  fi
+  rm -f "$merge_file"
 
-[Install]
-WantedBy=multi-user.target
-UNIT_EOF
+  systemctl enable --now llng-fastcgi-server
 
-  systemctl daemon-reload
-  systemctl enable --now auth-ldap
-
-  info "auth-ldap ブリッジの起動を待機中..."
+  info "LemonLDAP::NG FastCGI デーモンの起動を待機中..."
   local ready=false
   for i in $(seq 1 30); do
-    if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:9091/verify" 2>/dev/null)" == "401" ]]; then
+    if [[ -S /run/llng-fastcgi-server/llng-fastcgi.sock ]]; then
       ready=true; break
     fi
     sleep 1
   done
 
   if [[ "$ready" == "false" ]]; then
-    warn "auth-ldap ブリッジの起動がタイムアウトしました"
-    warn "  journalctl -u auth-ldap -n 50 --no-pager"
+    warn "LemonLDAP::NG FastCGI デーモンの起動に失敗しました"
+    warn "  journalctl -u llng-fastcgi-server -n 50 --no-pager"
     return 1
   fi
-  ok "auth-ldap ブリッジ起動完了"
+  ok "LemonLDAP::NG 起動完了"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -285,19 +301,19 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   ok "firewalld 設定完了"
 fi
 
-# ─── 8. LLDAP セットアップ ──────────────────────────────────────────────────
+# ─── 8. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
 LLDAP_ENABLED="no"
 LLDAP_ADMIN_URL="http://127.0.0.1:17170"
 
 if [[ "${SKIP_LLDAP:-no}" == "yes" ]]; then
-  warn "LLDAP のセットアップをスキップします (SKIP_LLDAP=yes)"
+  warn "LLDAP / LemonLDAP::NG のセットアップをスキップします (SKIP_LLDAP=yes)"
 else
-  info "LLDAP をセットアップ中..."
+  info "LLDAP / LemonLDAP::NG をセットアップ中..."
   if setup_lldap; then
     LLDAP_ENABLED="yes"
-    ok "LLDAP セットアップ完了"
+    ok "LLDAP / LemonLDAP::NG セットアップ完了"
   else
-    warn "LLDAP のセットアップに失敗しました。認証なしで続行します"
+    warn "LLDAP / LemonLDAP::NG のセットアップに失敗しました。認証なしで続行します"
   fi
 fi
 
@@ -349,20 +365,68 @@ info "nginx を設定中..."
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
   cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - メインサーバー設定（install.sh が生成）
+map \$lmlocation \$lmerror_location {
+    ~^      \$lmlocation;
+    default @lmAuth401;
+}
+upstream llng_upstream {
+    server unix:/run/llng-fastcgi-server/llng-fastcgi.sock;
+}
 server {
     listen 80;
     server_name ${DOMAIN};
 
-    location = /auth-ldap {
-        internal;
-        proxy_pass              http://127.0.0.1:9091/verify;
-        proxy_pass_request_body off;
-        proxy_set_header        Content-Length "";
-        proxy_set_header        Authorization \$http_authorization;
+    # --- LemonLDAP::NG ポータル（ログイン画面、/_auth/ 配下） ---
+    location /_auth/static/ {
+        alias /usr/share/lemonldap-ng/portal/htdocs/static/;
+    }
+    location ~ ^/_auth(?<sc>/.*\.psgi)(?:\$|/) {
+        include /etc/nginx/fastcgi_params;
+        fastcgi_pass              llng_upstream;
+        fastcgi_param HTTP_HOST   \$host;
+        fastcgi_param LLTYPE      psgi;
+        fastcgi_param SCRIPT_FILENAME /usr/share/lemonldap-ng/portal/htdocs\$sc;
+        fastcgi_param SCRIPT_NAME /_auth\$sc;
+        fastcgi_split_path_info   ^(/_auth/.*\.psgi)(/.*)\$;
+        fastcgi_param PATH_INFO   \$fastcgi_path_info;
+        fastcgi_param UNIQUE_ID   \$request_id;
+    }
+    location /_auth/ {
+        rewrite ^/_auth/(.*)\$ /_auth/index.psgi/\$1 last;
     }
 
-    location @basic_auth_prompt {
-        add_header WWW-Authenticate 'Basic realm="DevBox Platform"' always;
+    # --- LLDAP 管理画面（/lldap/。static/api/auth は絶対パス前提のため予約） ---
+    location = /lldap {
+        return 301 /lldap/;
+    }
+    location /lldap/ {
+        proxy_pass       http://127.0.0.1:17170/;
+        proxy_set_header Host \$host;
+    }
+    location /static/ {
+        proxy_pass http://127.0.0.1:17170/static/;
+    }
+    location /api/ {
+        proxy_pass        http://127.0.0.1:17170/api/;
+        proxy_set_header  Host \$host;
+    }
+    location /auth/ {
+        proxy_pass        http://127.0.0.1:17170/auth/;
+        proxy_set_header  Host \$host;
+    }
+
+    # --- Forward Auth ハンドラ（nginx auth_request から呼ばれる） ---
+    location = /lmauth {
+        internal;
+        include /etc/nginx/fastcgi_params;
+        fastcgi_pass             llng_upstream;
+        fastcgi_pass_request_body off;
+        fastcgi_param CONTENT_LENGTH "";
+        fastcgi_param HTTP_HOST  \$host;
+        fastcgi_param X_ORIGINAL_URI \$original_uri;
+        fastcgi_param UNIQUE_ID  \$request_id;
+    }
+    location @lmAuth401 {
         return 401;
     }
 
@@ -374,9 +438,9 @@ server {
     include /etc/nginx/conf.d/devbox-users/*.conf;
 }
 NGINX_EOF
-  ok "nginx: LDAP (LLDAP) Basic 認証付きで設定"
+  ok "nginx: LemonLDAP::NG（専用ログイン画面 + LDAP 認証）付きで設定"
 else
-  warn "nginx: 認証なしで設定（LLDAP 未設定）"
+  warn "nginx: 認証なしで設定（LLDAP / LemonLDAP::NG 未設定）"
   cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - 認証なし設定（install.sh が生成）
 # LLDAP を設定したら SKIP_LLDAP=no で install.sh を再実行
@@ -406,6 +470,6 @@ echo "次のステップ:"
 echo "  ユーザー追加: sudo bash scripts/adduser.sh <username>"
 echo "  アクセス    : http://${DOMAIN}/<username>/"
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
-  echo "  LLDAP       : http://${DOMAIN}:17170"
+  echo "  LLDAP       : http://${DOMAIN}/lldap/"
 fi
 echo ""

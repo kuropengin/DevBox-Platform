@@ -12,12 +12,14 @@ http://devbox.example.com
   /[username]/gui/     → Xpra HTML5 デスクトップ
 ```
 
-認証は **LLDAP（LDAP ディレクトリ）+ auth-ldap（自作の nginx auth_request ブリッジ）**
-で nginx レベルの Basic 認証として処理します。LLDAP は dnf（openSUSE Build
-Service 経由の RPM）でインストールでき、auth-ldap は Python 標準ライブラリのみ
-で書かれた小さなスクリプトです。どちらもソースからのビルドが一切不要なため、
-コンテナが使えない環境でもアップデートのたびにビルド環境を整える必要が
-ありません。
+認証は **LLDAP（LDAP ディレクトリ）+ LemonLDAP::NG（ログイン画面 + nginx
+Forward Auth）** で処理します。LLDAP は dnf（openSUSE Build Service 経由の
+RPM）、LemonLDAP::NG は EPEL 公式パッケージでインストールでき、どちらも
+ソースからのビルドが一切不要です。コンテナが使えない環境でもアップデートの
+たびにビルド環境を整える必要がありません。
+
+セッション Cookie を使った専用ログイン画面（`/_auth/`）を持ち、HTTP Basic
+認証のようにリクエスト毎に資格情報を送り続けることはありません。
 
 ## ファイル構成
 
@@ -30,16 +32,15 @@ devbox-platform/
 │   ├── vscode@.service         # VS Code serve-web
 │   └── xpra@.service           # Xpra HTML5 デスクトップ
 └── scripts/
-    ├── install.sh              # 初回セットアップ（LLDAP / auth-ldap を含む）
-    ├── adduser.sh              # ユーザー追加
-    └── auth-ldap/
-        └── auth_ldap.py        # nginx auth_request → LDAP bind ブリッジ
+    ├── install.sh              # 初回セットアップ（LLDAP / LemonLDAP::NG を含む）
+    └── adduser.sh              # ユーザー追加
 ```
 
 ## 動作環境
 
 - AlmaLinux 9 / Rocky Linux 9 / RHEL 9
-- SELinux: Enforcing のまま動作（自動設定）
+- SELinux: Enforcing のまま動作（自動設定。ただし LemonLDAP::NG 部分は
+  Enforcing 環境での動作を未検証、[LemonLDAP::NG / LLDAP 構成](#lemonldapng--lldap-構成) 参照）
 - コンテナ / VM 不使用（すべてネイティブインストール）
 
 ## セットアップ
@@ -66,16 +67,22 @@ install.sh が行うこと:
 | XFCE | デスクトップ環境 |
 | nginx | リバースプロキシ |
 | SELinux | `httpd_can_network_connect` を有効化 |
-| firewalld | HTTP / HTTPS / 17170(LLDAP 管理画面) を開放 |
+| firewalld | HTTP / HTTPS を開放（LLDAP・LemonLDAP::NG は localhost のみで待受） |
 | **LLDAP** | dnf（OBS リポジトリの RPM）でネイティブインストール |
-| **auth-ldap** | nginx auth_request 用の LDAP bind ブリッジ（Python 標準ライブラリのみ） |
+| **LemonLDAP::NG** | dnf（EPEL 公式パッケージ）でネイティブインストール |
 | ポータル HTML | `/opt/devbox/portal/` へコピー |
 | systemd ユニット | テンプレートユニットを `/etc/systemd/system/` へインストール |
-| nginx 設定 | LDAP Basic 認証（auth-ldap 経由）付きで生成 |
+| nginx 設定 | LemonLDAP::NG によるログイン画面 + Forward Auth 付きで生成 |
 
 LLDAP 認証情報は `/etc/devbox/lldap.env`（権限 600）に保存されます。
 
-#### LLDAP をスキップしたい場合
+`DEVBOX_DOMAIN` に IP アドレスを指定した場合、LemonLDAP::NG の Cookie
+ドメイン制約（数字だけのラベルは不可）のため、install.sh が自動的に
+`192-168-11-64.sslip.io` のような [sslip.io](https://sslip.io/) 経由の
+ホスト名に変換します（インターネット経由の DNS 解決が必要です。閉域網の
+場合は別途ホスト名を用意してください）。
+
+#### LLDAP / LemonLDAP::NG をスキップしたい場合
 
 ```bash
 SKIP_LLDAP=yes DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/install.sh
@@ -97,6 +104,9 @@ adduser.sh が行うこと:
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
 | nginx | `/etc/nginx/conf.d/devbox-users/[username].conf` を生成・リロード |
 | LLDAP | `LLDAP_ADMIN_PASSWORD` がある場合のみ GraphQL API + `lldap_set_password` でユーザー登録 |
+
+ユーザー名には `_auth` / `static` / `api` / `auth` / `lldap` / `lmauth` は
+使用できません（nginx のトップレベルパスとして予約済みのため）。
 
 ## systemd 構成
 
@@ -128,8 +138,8 @@ ss -tlnp | grep -E '10000|14500'
 journalctl -u vscode@yamada.service -f
 journalctl -u xpra@yamada.service   -f
 
-# LLDAP / auth-ldap サービス確認
-systemctl status lldap auth-ldap
+# LLDAP / LemonLDAP::NG サービス確認
+systemctl status lldap llng-fastcgi-server
 ```
 
 ## ポート割り当て
@@ -140,34 +150,50 @@ systemctl status lldap auth-ldap
 | 1001 | 10001         | 14501      | :101             |
 | 1002 | 10002         | 14502      | :102             |
 
-## LLDAP / auth-ldap 構成
+## LemonLDAP::NG / LLDAP 構成
 
-install.sh が自動でセットアップします。LLDAP は RPM パッケージ、auth-ldap は
-リポジトリに含まれる Python 標準ライブラリのみのスクリプトなので、どちらも
-ビルドは一切発生しません。
+install.sh が自動でセットアップします。LLDAP は RPM パッケージ、
+LemonLDAP::NG は EPEL 公式パッケージなので、どちらもビルドは発生しません。
 
 | コンポーネント | 場所 |
 |---|---|
-| LLDAP | `dnf install lldap`([openSUSE Build Service](https://software.opensuse.org//download.html?project=home%3AMasgalor%3ALLDAP&package=lldap) の非公式 RPM、GPG 署名済み) |
-| openldap-clients | `dnf install openldap-clients`（RHEL 公式パッケージ、`ldapwhoami` を使用） |
-| auth-ldap | `/opt/devbox/auth-ldap/auth_ldap.py`（本リポジトリ同梱） |
+| LLDAP | `dnf install lldap`（[openSUSE Build Service](https://software.opensuse.org//download.html?project=home%3AMasgalor%3ALLDAP&package=lldap) の非公式 RPM、GPG 署名済み） |
+| LemonLDAP::NG | `dnf install lemonldap-ng lemonldap-ng-fastcgi-server lemonldap-ng-selinux`（EPEL 公式パッケージ） |
 | LLDAP 設定ファイル | `/etc/lldap/lldap_config.toml` |
+| LemonLDAP::NG 設定 | `lemonldap-ng-cli`（`/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli`）で投入。手組み JSON は `restore` ではなく `merge` を使うこと（`restore` は `cfgDate` が欠落し設定全体が読めなくなる） |
 | 認証情報 | `/etc/devbox/lldap.env`（権限 600） |
 
-管理画面（Web UI）: `http://{DEVBOX_DOMAIN}:17170`（Base DN: `dc=devbox,dc=local`）
+アクセス経路（すべて単一ドメイン上のパスで区別、サブドメイン不要）:
 
-nginx は各ユーザーの location で `auth_request /auth-ldap;` を発行し、
-`auth-ldap`（127.0.0.1:9091）が Basic 認証のユーザー名/パスワードを
-LLDAP（127.0.0.1:3890）に対して LDAP bind することで認証します。auth-ldap
-自体は localhost のみで待ち受け、外部に公開されません。LLDAP の LDAP
-プロトコル（3890番ポート）も firewalld で開放しないため外部到達不可ですが、
-管理 Web UI（17170番ポート）は管理者の利便性のため意図的に公開しています。
+| パス | 内容 |
+|---|---|
+| `/_auth/` | LemonLDAP::NG ポータル（ログイン画面） |
+| `/_auth/static/` | ポータルの静的アセット（`staticPrefix` を変更し LLDAP の `/static/` と衝突しないようにしている） |
+| `/lldap/` | LLDAP 管理画面（Web UI）。ポート 17170 は firewalld で開放せず、nginx 経由でのみアクセス可能 |
+| `/static/` `/api/` `/auth/` | LLDAP 管理画面が使う絶対パス（アプリ内部で固定参照されるため、この 3 つはトップレベルで LLDAP 専用に予約） |
+| `/{username}/...` | 各ユーザーの devbox。`auth_request /lmauth;` で LemonLDAP::NG のセッションを確認 |
 
-> **注意**: LLDAP の RPM は LLDAP プロジェクト公式ではなく、openSUSE Build
-> Service 上の個人メンテナ（@Masgalor）によるビルドです。LLDAP 本体の
-> リリースそのものは公式リポジトリのものです。
+nginx は各ユーザーの location で `auth_request /lmauth;` を発行し、
+LemonLDAP::NG の FastCGI ハンドラ（`llng-fastcgi-server`、Unix ソケット
+`/run/llng-fastcgi-server/llng-fastcgi.sock`）にセッション Cookie の有無・
+妥当性を問い合わせます。未認証の場合は `/_auth/` のログイン画面へ 302
+リダイレクトされ、ログイン後はセッション Cookie で以後のアクセスが認可
+されます。LLDAP・LemonLDAP::NG の管理系ポート（17170、Unix ソケット）は
+いずれも外部に公開せず、nginx のパスルーティング経由でのみ到達可能です。
+
+> **注意**:
+> - LLDAP の RPM は LLDAP プロジェクト公式ではなく、openSUSE Build
+>   Service 上の個人メンテナ（@Masgalor）によるビルドです。LLDAP 本体の
+>   リリースそのものは公式リポジトリのものです。
+> - LemonLDAP::NG 部分は SELinux Enforcing 環境での動作を実機検証できて
+>   いません（検証用サンドボックスが Permissive/Disabled のため）。
+>   `lemonldap-ng-selinux` パッケージが必要なポリシーを提供する想定です
+>   が、Enforcing なホストで導入する際は `journalctl` や `ausearch -m avc`
+>   を確認してください。
 
 詳細:
 - https://github.com/lldap/lldap
 - https://github.com/lldap/lldap/blob/main/docs/install.md#from-a-package-repository
+- https://lemonldap-ng.org/documentation/latest/
 - https://nginx.org/en/docs/http/ngx_http_auth_request_module.html
+- https://sslip.io/

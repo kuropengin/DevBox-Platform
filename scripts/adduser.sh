@@ -49,6 +49,12 @@ done
 [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "無効なユーザー名: $USERNAME"
 id "$USERNAME" &>/dev/null && die "ユーザー '$USERNAME' はすでに存在します"
 
+# nginx のトップレベルパスとして予約済み（LemonLDAP::NG ポータル / LLDAP 管理画面）
+RESERVED_USERNAMES=(_auth static api auth lldap lmauth)
+for reserved in "${RESERVED_USERNAMES[@]}"; do
+  [[ "$USERNAME" == "$reserved" ]] && die "'${USERNAME}' は予約語のため使用できません"
+done
+
 echo ""
 info "ユーザー '$USERNAME' を追加します (CPU: ${CPU_QUOTA}, Memory: ${MEMORY_MAX})"
 echo ""
@@ -113,10 +119,13 @@ ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpr
 info "nginx 設定を追加中..."
 mkdir -p /etc/nginx/conf.d/devbox-users
 
-# LLDAP 有効時は auth_request ブロックを含める（auth-ldap ブリッジ経由の Basic 認証）
+# LLDAP 有効時は auth_request ブロックを含める（LemonLDAP::NG Forward Auth）
 if [[ "${LLDAP_ENABLED:-no}" == "yes" ]]; then
-  AUTH_BLOCK='    auth_request      /auth-ldap;
-    error_page 401    = @basic_auth_prompt;'
+  AUTH_BLOCK='    set               $original_uri $uri$is_args$args;
+    auth_request      /lmauth;
+    auth_request_set  $lmremote_user $upstream_http_lm_remote_user;
+    auth_request_set  $lmlocation $upstream_http_location;
+    error_page 401    $lmerror_location;'
 else
   AUTH_BLOCK=''
 fi
