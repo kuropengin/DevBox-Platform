@@ -142,6 +142,16 @@ setup_lemonldap() {
 
   dnf install -y lemonldap-ng lemonldap-ng-fastcgi-server lemonldap-ng-selinux
 
+  # パッケージが /etc/nginx/conf.d/ に配置するサンプル設定（server_name が
+  # auth.example.com 等のプレースホルダードメインで、server{} で囲われて
+  # いないものもある）は devbox.conf と競合する（例: handler-nginx.conf の
+  # error_page が http コンテキストのデフォルトとして効いてしまう）ため削除する。
+  rm -f /etc/nginx/conf.d/portal-nginx.conf \
+        /etc/nginx/conf.d/manager-nginx.conf \
+        /etc/nginx/conf.d/api-nginx.conf \
+        /etc/nginx/conf.d/handler-nginx.conf \
+        /etc/nginx/conf.d/test-nginx.conf
+
   # shellcheck disable=SC1091
   source /etc/devbox/lldap.env
 
