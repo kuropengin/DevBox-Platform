@@ -190,6 +190,16 @@ adduser.sh がユーザー作成時に `^/{username}/(.*)  =>  $uid eq "{usernam
 ユーザー）では、該当ユーザーに対して adduser.sh を再実行するか、
 `lemonldap-ng-cli merge` で個別にルールを追加してください。
 
+**ログイン画面（ポータル）の設定**: 以下を install.sh が自動設定しています。
+
+| 項目 | 設定 |
+|---|---|
+| ログアウト | 有効（`/_auth/?logout=1`。devbox ポータル画面下部にリンクあり） |
+| パスワード変更 | 有効（`/_auth/index.psgi/changepwd`。LDAP のパスワードが直接更新される） |
+| 新規アカウント作成 | 無効（`registerDB=Null` に加え `portalDisplayRegister=0` でボタン自体も非表示） |
+| アプリ一覧タブ・ログイン履歴タブ・セッション再確認リンク | 非表示（`portalDisplay*` を無効化。devbox 一台の運用では不要なため） |
+| ログイン画面の「前回のログインを確認」チェックボックス | 非表示（`portalCheckLogins=0`） |
+
 > **注意**:
 > - LLDAP の RPM は LLDAP プロジェクト公式ではなく、openSUSE Build
 >   Service 上の個人メンテナ（@Masgalor）によるビルドです。LLDAP 本体の

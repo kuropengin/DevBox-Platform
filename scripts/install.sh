@@ -186,7 +186,16 @@ setup_lemonldap() {
   },
   "exportedVars": {},
   "groups": {},
-  "macros": {}
+  "macros": {},
+
+  "portalDisplayRegister": 0,
+  "portalDisplayAppslist": 0,
+  "portalDisplayLoginHistory": 0,
+  "portalDisplayRefreshMyRights": 0,
+  "portalDisplayChangePassword": 1,
+  "portalDisplayLogout": 1,
+  "loginHistoryEnabled": 0,
+  "portalCheckLogins": 0
 }
 JSON_EOF
 

@@ -74,6 +74,15 @@
     .link-btn .arrow { color: #484f58; font-size: 0.9rem; }
 
     .error { text-align: center; color: #f85149; font-size: 0.9rem; }
+
+    .logout-link {
+      display: block;
+      text-align: center;
+      color: #8b949e;
+      font-size: 0.8rem;
+      text-decoration: none;
+    }
+    .logout-link:hover { color: #f85149; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -104,6 +113,8 @@
         <span class="arrow">↗</span>
       </a>
     </div>
+    <hr class="divider" />
+    <a class="logout-link" href="/_auth/?logout=1">ログアウト</a>
   </div>
 
   <div id="error" class="error" style="display:none">
