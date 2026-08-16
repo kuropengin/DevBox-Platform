@@ -170,7 +170,7 @@ LemonLDAP::NG は EPEL 公式パッケージなので、どちらもビルドは
 | `/_auth/` | LemonLDAP::NG ポータル（ログイン画面） |
 | `/_auth/static/` | ポータルの静的アセット（`staticPrefix` を変更し LLDAP の `/static/` と衝突しないようにしている） |
 | `/lldap/` | LLDAP 管理画面（Web UI）。ポート 17170 は firewalld で開放せず、nginx 経由でのみアクセス可能 |
-| `/static/` `/api/` `/auth/` | LLDAP 管理画面が使う絶対パス（アプリ内部で固定参照されるため、この 3 つはトップレベルで LLDAP 専用に予約） |
+| `/static/` `/pkg/` `/api/` `/auth/` | LLDAP 管理画面が使う絶対パス（アプリ内部で固定参照されるため、この 4 つはトップレベルで LLDAP 専用に予約） |
 | `/{username}/...` | 各ユーザーの devbox。`auth_request /lmauth;` で LemonLDAP::NG のセッションを確認 |
 
 nginx は各ユーザーの location で `auth_request /lmauth;` を発行し、
@@ -180,6 +180,15 @@ LemonLDAP::NG の FastCGI ハンドラ（`llng-fastcgi-server`、Unix ソケッ�
 リダイレクトされ、ログイン後はセッション Cookie で以後のアクセスが認可
 されます。LLDAP・LemonLDAP::NG の管理系ポート（17170、Unix ソケット）は
 いずれも外部に公開せず、nginx のパスルーティング経由でのみ到達可能です。
+
+**アクセス制御（認可）**: 「ログイン済みかどうか」だけでなく「本人の
+devbox かどうか」も LemonLDAP::NG の `locationRules` で制御しています。
+adduser.sh がユーザー作成時に `^/{username}/(.*)  =>  $uid eq "{username}"`
+という認可ルールを追加するため、ログイン済みの別ユーザーが他人の
+`/{username}/` にアクセスすると 403 になります。既存ユーザー分の
+ルールが入っていない環境（このアクセス制御を導入する前に作成した
+ユーザー）では、該当ユーザーに対して adduser.sh を再実行するか、
+`lemonldap-ng-cli merge` で個別にルールを追加してください。
 
 > **注意**:
 > - LLDAP の RPM は LLDAP プロジェクト公式ではなく、openSUSE Build

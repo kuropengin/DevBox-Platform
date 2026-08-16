@@ -386,6 +386,15 @@ server {
     listen 80;
     server_name ${DOMAIN};
 
+    # \$lmlocation・\$original_uri は本来ユーザー毎の nginx 設定
+    # （devbox-users/*.conf）内で set / auth_request_set により定義されるが、
+    # まだ一人もユーザーを追加していないときはその宣言がどこにも存在せず、
+    # map ディレクティブや /lmauth の参照先が見つからずに nginx の設定検証が
+    # 失敗する。ここで空文字のデフォルトを宣言し、devbox.conf 単体で常に
+    # 有効な設定になるようにする。
+    set \$lmlocation "";
+    set \$original_uri "";
+
     # --- LemonLDAP::NG ポータル（ログイン画面、/_auth/ 配下） ---
     location /_auth/static/ {
         alias /usr/share/lemonldap-ng/portal/htdocs/static/;
@@ -405,7 +414,7 @@ server {
         rewrite ^/_auth/(.*)\$ /_auth/index.psgi/\$1 last;
     }
 
-    # --- LLDAP 管理画面（/lldap/。static/api/auth は絶対パス前提のため予約） ---
+    # --- LLDAP 管理画面（/lldap/。static/pkg/api/auth は絶対パス前提のため予約） ---
     location = /lldap {
         return 301 /lldap/;
     }
@@ -415,6 +424,9 @@ server {
     }
     location /static/ {
         proxy_pass http://127.0.0.1:17170/static/;
+    }
+    location /pkg/ {
+        proxy_pass http://127.0.0.1:17170/pkg/;
     }
     location /api/ {
         proxy_pass        http://127.0.0.1:17170/api/;

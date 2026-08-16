@@ -50,7 +50,7 @@ done
 id "$USERNAME" &>/dev/null && die "ユーザー '$USERNAME' はすでに存在します"
 
 # nginx のトップレベルパスとして予約済み（LemonLDAP::NG ポータル / LLDAP 管理画面）
-RESERVED_USERNAMES=(_auth static api auth lldap lmauth)
+RESERVED_USERNAMES=(_auth static pkg api auth lldap lmauth)
 for reserved in "${RESERVED_USERNAMES[@]}"; do
   [[ "$USERNAME" == "$reserved" ]] && die "'${USERNAME}' は予約語のため使用できません"
 done
@@ -210,6 +210,34 @@ if [[ -n "${LLDAP_ADMIN_PASSWORD:-}" && -n "${LLDAP_URL:-}" ]]; then
 else
   warn "LLDAP_ADMIN_PASSWORD/LLDAP_URL が未設定のため LLDAP 登録をスキップ"
   warn "手動で追加: LLDAP_URL=... LLDAP_ADMIN_PASSWORD=... bash adduser.sh ${USERNAME}"
+fi
+
+# ─── 7. LemonLDAP::NG 認可ルール追加（本人以外は /${USERNAME}/ にアクセス不可に） ──
+if [[ "${LLDAP_ENABLED:-no}" == "yes" ]]; then
+  info "LemonLDAP::NG に認可ルールを追加中..."
+
+  LLNG_CLI="/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli"
+  RULE_FILE="$(mktemp)"
+  # lemonldap-ng-cli は内部で apache ユーザーに権限を落として設定ファイルを
+  # 読むため、root:root 600（mktemp のデフォルト）のままだと権限エラーになる。
+  chmod 644 "$RULE_FILE"
+  cat > "$RULE_FILE" << EOF
+{
+  "locationRules": {
+    "${DEVBOX_DOMAIN}": {
+      "^/${USERNAME}/(.*)": "\$uid eq \"${USERNAME}\""
+    }
+  }
+}
+EOF
+
+  if "$LLNG_CLI" -yes 1 merge "$RULE_FILE" &>/dev/null; then
+    ok "認可ルール追加完了（/${USERNAME}/ には ${USERNAME} 本人のみアクセス可）"
+  else
+    warn "LemonLDAP::NG 認可ルールの追加に失敗しました"
+    warn "  ログイン済みの他ユーザーが /${USERNAME}/ にアクセスできる状態です"
+  fi
+  rm -f "$RULE_FILE"
 fi
 
 # ─── 完了 ─────────────────────────────────────────────────────────────────────
