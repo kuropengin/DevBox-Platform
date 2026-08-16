@@ -14,6 +14,9 @@ DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 DEVBOX_DIR="/opt/devbox"
 LLDAP_BASE_DN="dc=devbox,dc=local"
 LLNG_CLI="/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli"
+TLS_DIR="/etc/devbox/tls"
+TLS_CERT="${TLS_DIR}/devbox.crt"
+TLS_KEY="${TLS_DIR}/devbox.key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -44,7 +47,7 @@ DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   warn "DEVBOX_DOMAIN が IP アドレスです。LemonLDAP::NG の制約により sslip.io 経由のホスト名に変換します"
   DOMAIN="${DOMAIN//./-}.sslip.io"
-  info "実際のアクセス先: http://${DOMAIN}（インターネット経由の DNS 解決が必要です）"
+  info "実際のアクセス先: https://${DOMAIN}（インターネット経由の DNS 解決が必要です）"
 fi
 
 # ─── LLDAP + LemonLDAP::NG セットアップ（dnf の RPM パッケージ、ビルド不要） ──
@@ -130,7 +133,7 @@ ENV_EOF
   setup_lemonldap || return 1
 
   echo ""
-  echo -e "  ${CYAN}LLDAP 管理画面${NC}: http://${DOMAIN}/lldap/"
+  echo -e "  ${CYAN}LLDAP 管理画面${NC}: https://${DOMAIN}/lldap/"
   echo -e "  ${CYAN}Admin${NC}    : ${LLDAP_ADMIN_USER}"
   echo -e "  ${CYAN}Password${NC} : ${LLDAP_ADMIN_PASSWORD}"
   echo    "  ※ 認証情報は /etc/devbox/lldap.env に保存されています"
@@ -175,10 +178,10 @@ setup_lemonldap() {
   "managerDn": "uid=${LLDAP_ADMIN_USER},ou=people,${LLDAP_BASE_DN}",
   "managerPassword": "${LLDAP_ADMIN_PASSWORD}",
   "domain": "${DOMAIN}",
-  "portal": "http://${DOMAIN}/_auth/",
+  "portal": "https://${DOMAIN}/_auth/",
   "staticPrefix": "/_auth/static",
   "cookieName": "devboxauth",
-  "securedCookie": 0,
+  "securedCookie": 1,
   "notification": 0,
   "applicationList": {},
   "locationRules": {
@@ -304,14 +307,32 @@ fi
 systemctl enable nginx
 ok "nginx 準備完了: $(nginx -v 2>&1)"
 
-# ─── 6. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
+# ─── 6. TLS 証明書（自己署名） ─────────────────────────────────────────────────
+# VS Code Web の webview（拡張機能の Webview、Markdown プレビュー等）はブラウザの
+# Web Crypto API（crypto.subtle）を使うが、これは HTTPS（セキュアコンテキスト）
+# でしか利用できない。閉域網でも動くよう、外部の認証局を使わない自己署名証明書
+# を生成して HTTPS 化する（初回アクセス時にブラウザの警告を承認する必要がある）。
+info "TLS 証明書（自己署名）を準備中..."
+mkdir -p "${TLS_DIR}"
+if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+    -keyout "$TLS_KEY" -out "$TLS_CERT" \
+    -subj "/CN=${DOMAIN}" \
+    -addext "subjectAltName=DNS:${DOMAIN}" 2>/dev/null
+  chmod 600 "$TLS_KEY"
+  ok "自己署名証明書を生成 → ${TLS_CERT}"
+else
+  ok "TLS 証明書は既存のものを使用: ${TLS_CERT}"
+fi
+
+# ─── 7. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
 if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
   info "SELinux ポリシーを設定中..."
   setsebool -P httpd_can_network_connect 1 || warn "setsebool に失敗しました（続行します）"
   ok "SELinux: httpd_can_network_connect 有効"
 fi
 
-# ─── 7. firewalld — HTTP/HTTPS を開放 ─────────────────────────────────────────
+# ─── 8. firewalld — HTTP/HTTPS を開放 ─────────────────────────────────────────
 if systemctl is-active --quiet firewalld 2>/dev/null; then
   info "firewalld で HTTP/HTTPS を開放中..."
   firewall-cmd --permanent --add-service=http
@@ -320,7 +341,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   ok "firewalld 設定完了"
 fi
 
-# ─── 8. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
+# ─── 9. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
 LLDAP_ENABLED="no"
 LLDAP_ADMIN_URL="http://127.0.0.1:17170"
 
@@ -336,7 +357,7 @@ else
   fi
 fi
 
-# ─── 9. ディレクトリ作成 ──────────────────────────────────────────────────────
+# ─── 10. ディレクトリ作成 ──────────────────────────────────────────────────────
 info "ディレクトリを作成中..."
 mkdir -p "${DEVBOX_DIR}/portal" /etc/devbox/users /etc/nginx/conf.d/devbox-users
 
@@ -347,12 +368,12 @@ elif command -v chcon &>/dev/null; then
 fi
 ok "ディレクトリ作成完了"
 
-# ─── 10. ポータル HTML ────────────────────────────────────────────────────────
+# ─── 11. ポータル HTML ────────────────────────────────────────────────────────
 info "ポータル HTML をコピー中..."
 cp "${REPO_DIR}/portal/index.html" "${DEVBOX_DIR}/portal/index.html"
 ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
-# ─── 11. systemd テンプレートユニット ────────────────────────────────────────
+# ─── 12. systemd テンプレートユニット ────────────────────────────────────────
 info "systemd ユニットをインストール中..."
 for unit in devbox@.target vscode@.service xpra@.service; do
   cp "${REPO_DIR}/systemd/${unit}" "/etc/systemd/system/${unit}"
@@ -360,7 +381,7 @@ done
 systemctl daemon-reload
 ok "systemd ユニットインストール完了"
 
-# ─── 12. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
+# ─── 13. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
 LLDAP_ADMIN_USER=""
 LLDAP_ADMIN_PASSWORD=""
 [[ -f /etc/devbox/lldap.env ]] && {
@@ -378,7 +399,7 @@ LLDAP_ENABLED=${LLDAP_ENABLED}
 PLATFORM_EOF
 chmod 600 /etc/devbox/platform.conf
 
-# ─── 13. nginx メイン設定 ─────────────────────────────────────────────────────
+# ─── 14. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
 
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
@@ -394,6 +415,15 @@ upstream llng_upstream {
 server {
     listen 80;
     server_name ${DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN};
+
+    ssl_certificate     ${TLS_CERT};
+    ssl_certificate_key ${TLS_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
 
     # \$lmlocation・\$original_uri は本来ユーザー毎の nginx 設定
     # （devbox-users/*.conf）内で set / auth_request_set により定義されるが、
@@ -478,6 +508,15 @@ else
 server {
     listen 80;
     server_name ${DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN};
+
+    ssl_certificate     ${TLS_CERT};
+    ssl_certificate_key ${TLS_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
 
     location = / {
         return 200 "DevBox Platform\n";
@@ -499,8 +538,8 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "次のステップ:"
 echo "  ユーザー追加: sudo bash scripts/adduser.sh <username>"
-echo "  アクセス    : http://${DOMAIN}/<username>/"
+echo "  アクセス    : https://${DOMAIN}/<username>/"
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
-  echo "  LLDAP       : http://${DOMAIN}/lldap/"
+  echo "  LLDAP       : https://${DOMAIN}/lldap/"
 fi
 echo ""

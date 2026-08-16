@@ -6,7 +6,7 @@ RHEL 9 系（AlmaLinux 9 / Rocky Linux 9）で VS Code + Linux デスクトッ�
 ## アクセス構成
 
 ```
-http://devbox.example.com
+https://devbox.example.com
   /[username]/         → ポータルページ（静的 HTML）
   /[username]/vscode/  → VS Code (code serve-web)
   /[username]/gui/     → Xpra HTML5 デスクトップ
@@ -20,6 +20,12 @@ RPM）、LemonLDAP::NG は EPEL 公式パッケージでインストールでき
 
 セッション Cookie を使った専用ログイン画面（`/_auth/`）を持ち、HTTP Basic
 認証のようにリクエスト毎に資格情報を送り続けることはありません。
+
+通信は install.sh が自動生成する**自己署名証明書**で HTTPS 化されており
+（HTTP は 443 へ自動リダイレクト）、初回アクセス時にブラウザの警告を
+承認する必要があります。VS Code Web の webview（拡張機能の Webview、
+Markdown プレビュー等）はブラウザの Web Crypto API を使うため HTTPS
+（セキュアコンテキスト）必須で、これが無いと動作しません。
 
 ## ファイル構成
 
@@ -66,15 +72,17 @@ install.sh が行うこと:
 | Xpra + xpra-html5 | EPEL + ソースビルド |
 | XFCE | デスクトップ環境 |
 | nginx | リバースプロキシ |
+| **TLS 証明書** | 自己署名証明書を生成（`/etc/devbox/tls/`）。HTTP は 443 へリダイレクト |
 | SELinux | `httpd_can_network_connect` を有効化 |
 | firewalld | HTTP / HTTPS を開放（LLDAP・LemonLDAP::NG は localhost のみで待受） |
 | **LLDAP** | dnf（OBS リポジトリの RPM）でネイティブインストール |
 | **LemonLDAP::NG** | dnf（EPEL 公式パッケージ）でネイティブインストール |
 | ポータル HTML | `/opt/devbox/portal/` へコピー |
 | systemd ユニット | テンプレートユニットを `/etc/systemd/system/` へインストール |
-| nginx 設定 | LemonLDAP::NG によるログイン画面 + Forward Auth 付きで生成 |
+| nginx 設定 | HTTPS + LemonLDAP::NG によるログイン画面 + Forward Auth 付きで生成 |
 
 LLDAP 認証情報は `/etc/devbox/lldap.env`（権限 600）に保存されます。
+TLS の秘密鍵は `/etc/devbox/tls/devbox.key`（権限 600）に保存されます。
 
 `DEVBOX_DOMAIN` に IP アドレスを指定した場合、LemonLDAP::NG の Cookie
 ドメイン制約（数字だけのラベルは不可）のため、install.sh が自動的に

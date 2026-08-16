@@ -246,9 +246,9 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GREEN}  ユーザー '${USERNAME}' の追加が完了しました！${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo "  ポータル : http://${DEVBOX_DOMAIN}/${USERNAME}/"
-echo "  VS Code  : http://${DEVBOX_DOMAIN}/${USERNAME}/vscode/"
-echo "  GUI      : http://${DEVBOX_DOMAIN}/${USERNAME}/gui/"
+echo "  ポータル : https://${DEVBOX_DOMAIN}/${USERNAME}/"
+echo "  VS Code  : https://${DEVBOX_DOMAIN}/${USERNAME}/vscode/"
+echo "  GUI      : https://${DEVBOX_DOMAIN}/${USERNAME}/gui/"
 echo ""
 if [[ -n "$USER_LDAP_PASS" ]]; then
   echo "  ログインID    : ${USERNAME}"
