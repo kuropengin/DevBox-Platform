@@ -4,15 +4,16 @@
 # 使い方: sudo bash install.sh
 #
 # 環境変数（任意）:
-#   DEVBOX_DOMAIN             例: devbox.example.com  (デフォルト: devbox.example.com)
-#   AUTHENTIK_ADMIN_PASSWORD  初期管理者パスワード（未設定時は自動生成）
-#   SKIP_AUTHENTIK=yes        Authentik のセットアップをスキップ
+#   DEVBOX_DOMAIN          例: devbox.example.com  (デフォルト: devbox.example.com)
+#   LLDAP_ADMIN_PASSWORD   初期管理者パスワード（未設定時は自動生成）
+#   SKIP_LLDAP=yes         LLDAP のセットアップをスキップ
 
 set -euo pipefail
 
 DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 DEVBOX_DIR="/opt/devbox"
-AUTHENTIK_DIR="/opt/authentik"
+AUTH_LDAP_DIR="/opt/devbox/auth-ldap"
+LLDAP_BASE_DN="dc=devbox,dc=local"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -37,182 +38,133 @@ done
 # .env を読み込んだ後に DOMAIN を再評価
 DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 
-# ─── Authentik セットアップ関数（ネイティブインストール） ────────────────────────
+# ─── LLDAP セットアップ関数（dnf の RPM パッケージ、ビルド不要） ──────────────
+#
+# LLDAP は Fedora/EPEL に公式パッケージが無いため、openSUSE Build Service (OBS)
+# が提供する CentOS 9 Stream 向け非公式ビルド（GPG 署名済み）を dnf リポジトリ
+# として登録して利用する。以後は `dnf update` だけで追随でき、Authentik の
+# ようにアップデートのたびに npm/uv でソースビルドする必要はない。
+#
+# Forward Auth は nginx の auth_request から、LLDAP に対して LDAP bind を行う
+# だけの小さな Python 標準ライブラリ製ブリッジ（auth_ldap.py）で実現する。
+# ldapwhoami は openldap-clients（RHEL 公式パッケージ）を利用する。
 
-setup_authentik() {
-  info "Authentik をソースビルドでインストール中..."
+setup_lldap() {
+  info "LLDAP をインストール中（RPM パッケージ、ビルド不要）..."
 
   mkdir -p /etc/devbox /etc/devbox/users
 
-  # ─── 依存パッケージ ──────────────────────────────────────────────────────────
-  dnf install -y \
-    postgresql-server postgresql-contrib \
-    python3.14 python3.14-devel \
-    redis \
-    gcc openssl-devel libpq-devel \
-    openldap-devel cyrus-sasl-devel libffi-devel \
-    krb5-devel \
-    git
-
-  # Node.js 20 のインストール（フロントエンドビルドに必要）
-  if ! command -v node &>/dev/null || [[ $(node --version 2>/dev/null | tr -d 'v' | cut -d. -f1) -lt 20 ]]; then
-    info "Node.js 20 をインストール中..."
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-    dnf install -y nodejs
+  # ─── OBS リポジトリ登録 ──────────────────────────────────────────────────────
+  if [[ ! -f /etc/yum.repos.d/lldap.repo ]]; then
+    cat > /etc/yum.repos.d/lldap.repo << 'REPO_EOF'
+[home_Masgalor_LLDAP]
+name=LLDAP - Light LDAP implementation for authentication (CentOS-9_Stream)
+type=rpm-md
+baseurl=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/CentOS-9_Stream/
+gpgcheck=1
+gpgkey=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/CentOS-9_Stream/repodata/repomd.xml.key
+enabled=1
+REPO_EOF
   fi
-  ok "Node.js $(node --version) インストール完了"
 
-  # ─── PostgreSQL ───────────────────────────────────────────────────────────────
-  if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
-    info "PostgreSQL を初期化中..."
-    postgresql-setup --initdb
-  fi
-  systemctl enable --now postgresql
-
-  local hba=/var/lib/pgsql/data/pg_hba.conf
-  grep -q 'authentik' "$hba" || \
-    sed -i '/^local\s*all\s*all/i local   authentik   authentik   md5\nhost    authentik   authentik   127.0.0.1/32   md5' "$hba"
-  systemctl reload postgresql 2>/dev/null || systemctl restart postgresql
+  dnf install -y lldap lldap-set-password openldap-clients
 
   # ─── 認証情報の生成（初回のみ） ──────────────────────────────────────────────
-  if [[ ! -f /etc/devbox/authentik.env ]]; then
-    local pg_pass secret_key admin_pass bootstrap_token
-    pg_pass=$(openssl rand -hex 16)
-    secret_key=$(openssl rand -hex 32)
-    admin_pass="${AUTHENTIK_ADMIN_PASSWORD:-$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)}"
-    bootstrap_token=$(openssl rand -hex 32)
+  if [[ ! -f /etc/devbox/lldap.env ]]; then
+    local jwt_secret key_seed admin_pass
+    jwt_secret=$(openssl rand -hex 32)
+    key_seed=$(openssl rand -hex 16)
+    admin_pass="${LLDAP_ADMIN_PASSWORD:-$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)}"
 
-    cat > /etc/devbox/authentik.env << ENV_EOF
-AUTHENTIK_PG_PASS=${pg_pass}
-AUTHENTIK_SECRET_KEY=${secret_key}
-AUTHENTIK_BOOTSTRAP_EMAIL=admin@${DOMAIN}
-AUTHENTIK_BOOTSTRAP_PASSWORD=${admin_pass}
-AUTHENTIK_BOOTSTRAP_TOKEN=${bootstrap_token}
+    cat > /etc/devbox/lldap.env << ENV_EOF
+LLDAP_BASE_DN=${LLDAP_BASE_DN}
+LLDAP_ADMIN_USER=admin
+LLDAP_ADMIN_PASSWORD=${admin_pass}
+LLDAP_JWT_SECRET=${jwt_secret}
+LLDAP_KEY_SEED=${key_seed}
 ENV_EOF
-    chmod 600 /etc/devbox/authentik.env
+    chmod 600 /etc/devbox/lldap.env
   fi
 
   # shellcheck disable=SC1091
-  source /etc/devbox/authentik.env
+  source /etc/devbox/lldap.env
 
-  # ─── PostgreSQL ユーザー・DB ───────────────────────────────────────────────
-  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='authentik'" | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE USER authentik WITH PASSWORD '${AUTHENTIK_PG_PASS}';"
-  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='authentik'" | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE DATABASE authentik OWNER authentik;"
+  # ─── 設定ファイル ─────────────────────────────────────────────────────────────
+  sed -i \
+    -e "s|^jwt_secret = .*|jwt_secret = \"${LLDAP_JWT_SECRET}\"|" \
+    -e "s|^key_seed = .*|key_seed = \"${LLDAP_KEY_SEED}\"|" \
+    -e "s|^ldap_user_pass = .*|ldap_user_pass = \"${LLDAP_ADMIN_PASSWORD}\"|" \
+    -e "s|^#ldap_base_dn = .*|ldap_base_dn = \"${LLDAP_BASE_DN}\"|" \
+    /etc/lldap/lldap_config.toml
+  chown -R lldap:lldap /etc/lldap
 
-  # ─── Redis ────────────────────────────────────────────────────────────────────
-  systemctl enable --now redis
+  systemctl enable --now lldap
 
-  # ─── authentik システムユーザー ───────────────────────────────────────────────
-  id authentik &>/dev/null || useradd -r -d /opt/authentik -s /sbin/nologin authentik
-  mkdir -p /opt/authentik
-  chown authentik:authentik /opt/authentik
-
-  # ─── Authentik バージョンを取得（最新安定版） ────────────────────────────────
-  local version py_cmd
-  py_cmd="python3.14"
-  version=$(curl -sf https://api.github.com/repos/goauthentik/authentik/releases/latest \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].replace('version/',''))" 2>/dev/null || echo "")
-  [[ -z "$version" ]] && die "Authentik リリースバージョンの取得に失敗しました"
-  info "Authentik ${version} をビルド中..."
-
-  local build_dir="/opt/authentik-src-${version}"
-
-  # ─── ソースクローン（初回のみ） ───────────────────────────────────────────────
-  if [[ ! -d "$build_dir/.git" ]]; then
-    info "ソースコードをクローン中（時間がかかります）..."
-    git clone --depth=1 --branch "version/${version}" \
-      https://github.com/goauthentik/authentik.git "$build_dir"
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-port=17170/tcp 2>/dev/null || true
+    firewall-cmd --reload 2>/dev/null || true
   fi
 
-  # ─── フロントエンドビルド ─────────────────────────────────────────────────────
-  if [[ ! -d "${build_dir}/web/dist" ]]; then
-    info "フロントエンドをビルド中（npm、数分かかります）..."
-    cd "${build_dir}/web"
-    npm ci --no-audit --prefer-offline 2>&1 | tail -3
-    npm run build 2>&1 | tail -5
-    cd /
-    ok "フロントエンドビルド完了"
+  # ─── 起動待機 ─────────────────────────────────────────────────────────────────
+  info "LLDAP の起動を待機中..."
+  local ready=false
+  for i in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:17170/" &>/dev/null; then
+      ready=true; break
+    fi
+    sleep 2
+  done
+
+  if [[ "$ready" == "false" ]]; then
+    warn "LLDAP の起動がタイムアウトしました"
+    warn "  journalctl -u lldap -n 50 --no-pager"
+    return 1
   fi
+  ok "LLDAP 起動完了"
 
-  # ─── Python venv + インストール ───────────────────────────────────────────────
-  if [[ ! -x /opt/authentik/venv/bin/ak ]]; then
-    info "Python 仮想環境をセットアップ中..."
-    python3.14 -m venv /opt/authentik/venv
+  setup_auth_ldap || return 1
 
-    # venv の pip で uv をインストールし、venv 内の uv を使用
-    info "uv をインストール中..."
-    /opt/authentik/venv/bin/pip install uv --quiet
+  echo ""
+  echo -e "  ${CYAN}LLDAP 管理画面${NC}: http://${DOMAIN}:17170"
+  echo -e "  ${CYAN}Admin${NC}    : ${LLDAP_ADMIN_USER}"
+  echo -e "  ${CYAN}Password${NC} : ${LLDAP_ADMIN_PASSWORD}"
+  echo    "  ※ 認証情報は /etc/devbox/lldap.env に保存されています"
+}
 
-    info "Authentik をインストール中（uv sync、数分かかります）..."
-    # UV_PROJECT_ENVIRONMENT で既存 venv を指定（VIRTUAL_ENV は新 uv では無視される）
-    cd "$build_dir"
-    UV_PROJECT_ENVIRONMENT=/opt/authentik/venv /opt/authentik/venv/bin/uv sync --no-dev
-    cd /
+# ─── auth-ldap ブリッジ（nginx auth_request → LDAP bind、単なる Python スクリプト） ──
+setup_auth_ldap() {
+  info "auth-ldap ブリッジをセットアップ中..."
 
-    # venv の所有権を authentik ユーザーに変更
-    chown -R authentik:authentik /opt/authentik/venv
-    ok "Authentik Python インストール完了"
-  else
-    ok "Authentik は導入済み"
-  fi
+  mkdir -p "${AUTH_LDAP_DIR}"
+  cp "${REPO_DIR}/scripts/auth-ldap/auth_ldap.py" "${AUTH_LDAP_DIR}/auth_ldap.py"
 
-  # ─── 環境ファイルを生成 ───────────────────────────────────────────────────────
-  cat > /opt/authentik/.env << ENV_EOF
-AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
-AUTHENTIK_POSTGRESQL__HOST=localhost
-AUTHENTIK_POSTGRESQL__NAME=authentik
-AUTHENTIK_POSTGRESQL__USER=authentik
-AUTHENTIK_POSTGRESQL__PASSWORD=${AUTHENTIK_PG_PASS}
-AUTHENTIK_REDIS__HOST=localhost
-AUTHENTIK_BOOTSTRAP_EMAIL=${AUTHENTIK_BOOTSTRAP_EMAIL}
-AUTHENTIK_BOOTSTRAP_PASSWORD=${AUTHENTIK_BOOTSTRAP_PASSWORD}
-AUTHENTIK_BOOTSTRAP_TOKEN=${AUTHENTIK_BOOTSTRAP_TOKEN}
-AUTHENTIK_ERROR_REPORTING__ENABLED=false
+  id devbox-auth &>/dev/null || useradd -r -d "${AUTH_LDAP_DIR}" -s /sbin/nologin devbox-auth
+
+  # shellcheck disable=SC1091
+  source /etc/devbox/lldap.env
+
+  cat > "${AUTH_LDAP_DIR}/.env" << ENV_EOF
+LDAP_URL=ldap://127.0.0.1:3890
+LDAP_BASE_DN=${LLDAP_BASE_DN}
+LISTEN_HOST=127.0.0.1
+LISTEN_PORT=9091
 ENV_EOF
-  chown authentik:authentik /opt/authentik/.env
-  chmod 600 /opt/authentik/.env
+  chmod 600 "${AUTH_LDAP_DIR}/.env"
+  chown -R devbox-auth:devbox-auth "${AUTH_LDAP_DIR}"
 
-  # ─── マイグレーション ─────────────────────────────────────────────────────────
-  info "データベースマイグレーションを実行中..."
-  sudo -u authentik /opt/authentik/venv/bin/ak migrate
-
-  # ─── systemd サービス ─────────────────────────────────────────────────────────
-  cat > /etc/systemd/system/authentik-server.service << UNIT_EOF
+  cat > /etc/systemd/system/auth-ldap.service << UNIT_EOF
 [Unit]
-Description=Authentik Server
-After=postgresql.service redis.service
-Requires=postgresql.service redis.service
+Description=DevBox auth_request -> LDAP (LLDAP) bridge
+After=lldap.service
+Requires=lldap.service
 
 [Service]
 Type=simple
-User=authentik
-Group=authentik
-WorkingDirectory=/opt/authentik
-EnvironmentFile=/opt/authentik/.env
-ExecStart=/opt/authentik/venv/bin/ak server
-Restart=on-failure
-RestartSec=5
-TimeoutStartSec=120
-
-[Install]
-WantedBy=multi-user.target
-UNIT_EOF
-
-  cat > /etc/systemd/system/authentik-worker.service << UNIT_EOF
-[Unit]
-Description=Authentik Worker
-After=authentik-server.service
-Requires=postgresql.service redis.service
-
-[Service]
-Type=simple
-User=authentik
-Group=authentik
-WorkingDirectory=/opt/authentik
-EnvironmentFile=/opt/authentik/.env
-ExecStart=/opt/authentik/venv/bin/ak worker
+User=devbox-auth
+Group=devbox-auth
+WorkingDirectory=${AUTH_LDAP_DIR}
+EnvironmentFile=${AUTH_LDAP_DIR}/.env
+ExecStart=/usr/bin/python3 ${AUTH_LDAP_DIR}/auth_ldap.py
 Restart=on-failure
 RestartSec=5
 
@@ -221,37 +173,23 @@ WantedBy=multi-user.target
 UNIT_EOF
 
   systemctl daemon-reload
-  systemctl enable --now authentik-server authentik-worker
+  systemctl enable --now auth-ldap
 
-  if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-port=9000/tcp 2>/dev/null || true
-    firewall-cmd --reload 2>/dev/null || true
-  fi
-
-  # ─── 起動待機（最大 5 分） ────────────────────────────────────────────────────
-  info "Authentik の起動を待機中（最大 5 分）..."
+  info "auth-ldap ブリッジの起動を待機中..."
   local ready=false
-  for i in $(seq 1 60); do
-    if curl -sf "http://127.0.0.1:9000/-/health/ready/" &>/dev/null; then
+  for i in $(seq 1 30); do
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:9091/verify" 2>/dev/null)" == "401" ]]; then
       ready=true; break
     fi
-    sleep 5
+    sleep 1
   done
 
   if [[ "$ready" == "false" ]]; then
-    warn "Authentik の起動がタイムアウトしました"
-    warn "  journalctl -u authentik-server -n 50 --no-pager"
+    warn "auth-ldap ブリッジの起動がタイムアウトしました"
+    warn "  journalctl -u auth-ldap -n 50 --no-pager"
     return 1
   fi
-
-  ok "Authentik 起動完了"
-  configure_authentik_api "${AUTHENTIK_BOOTSTRAP_TOKEN}" && ok "Authentik API 設定完了" || warn "Authentik API 設定に失敗しました"
-
-  echo ""
-  echo -e "  ${CYAN}Authentik 管理画面${NC}: http://${DOMAIN}:9000"
-  echo -e "  ${CYAN}Email${NC}    : ${AUTHENTIK_BOOTSTRAP_EMAIL}"
-  echo -e "  ${CYAN}Password${NC} : ${AUTHENTIK_BOOTSTRAP_PASSWORD}"
-  echo    "  ※ 認証情報は /etc/devbox/authentik.env に保存されています"
+  ok "auth-ldap ブリッジ起動完了"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -347,19 +285,19 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   ok "firewalld 設定完了"
 fi
 
-# ─── 8. Authentik セットアップ ────────────────────────────────────────────────
-AUTHENTIK_ENABLED="no"
-AUTHENTIK_API_URL="http://127.0.0.1:9000"
+# ─── 8. LLDAP セットアップ ──────────────────────────────────────────────────
+LLDAP_ENABLED="no"
+LLDAP_ADMIN_URL="http://127.0.0.1:17170"
 
-if [[ "${SKIP_AUTHENTIK:-no}" == "yes" ]]; then
-  warn "Authentik のセットアップをスキップします (SKIP_AUTHENTIK=yes)"
+if [[ "${SKIP_LLDAP:-no}" == "yes" ]]; then
+  warn "LLDAP のセットアップをスキップします (SKIP_LLDAP=yes)"
 else
-  info "Authentik をセットアップ中..."
-  if setup_authentik; then
-    AUTHENTIK_ENABLED="yes"
-    ok "Authentik セットアップ完了"
+  info "LLDAP をセットアップ中..."
+  if setup_lldap; then
+    LLDAP_ENABLED="yes"
+    ok "LLDAP セットアップ完了"
   else
-    warn "Authentik のセットアップに失敗しました。認証なしで続行します"
+    warn "LLDAP のセットアップに失敗しました。認証なしで続行します"
   fi
 fi
 
@@ -388,41 +326,44 @@ systemctl daemon-reload
 ok "systemd ユニットインストール完了"
 
 # ─── 12. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
-AUTHENTIK_TOKEN=""
-[[ -f "${AUTHENTIK_DIR}/.env" ]] && \
-  AUTHENTIK_TOKEN=$(grep AUTHENTIK_BOOTSTRAP_TOKEN "${AUTHENTIK_DIR}/.env" | cut -d= -f2 || echo "")
+LLDAP_ADMIN_USER=""
+LLDAP_ADMIN_PASSWORD=""
+[[ -f /etc/devbox/lldap.env ]] && {
+  LLDAP_ADMIN_USER=$(grep '^LLDAP_ADMIN_USER=' /etc/devbox/lldap.env | cut -d= -f2 || echo "")
+  LLDAP_ADMIN_PASSWORD=$(grep '^LLDAP_ADMIN_PASSWORD=' /etc/devbox/lldap.env | cut -d= -f2 || echo "")
+}
 
 cat > /etc/devbox/platform.conf << PLATFORM_EOF
 DEVBOX_DOMAIN=${DOMAIN}
-AUTHENTIK_URL=${AUTHENTIK_API_URL}
-AUTHENTIK_TOKEN=${AUTHENTIK_TOKEN}
-AUTHENTIK_ENABLED=${AUTHENTIK_ENABLED}
+LLDAP_URL=${LLDAP_ADMIN_URL}
+LLDAP_BASE_DN=${LLDAP_BASE_DN}
+LLDAP_ADMIN_USER=${LLDAP_ADMIN_USER}
+LLDAP_ADMIN_PASSWORD=${LLDAP_ADMIN_PASSWORD}
+LLDAP_ENABLED=${LLDAP_ENABLED}
 PLATFORM_EOF
+chmod 600 /etc/devbox/platform.conf
 
 # ─── 13. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
 
-if [[ "$AUTHENTIK_ENABLED" == "yes" ]]; then
+if [[ "$LLDAP_ENABLED" == "yes" ]]; then
   cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - メインサーバー設定（install.sh が生成）
 server {
     listen 80;
     server_name ${DOMAIN};
 
-    location /outpost.goauthentik.io {
-        proxy_pass              ${AUTHENTIK_API_URL}/outpost.goauthentik.io;
-        proxy_set_header        Host \$host;
-        proxy_set_header        X-Real-IP \$remote_addr;
-        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header        X-Forwarded-Proto \$scheme;
+    location = /auth-ldap {
+        internal;
+        proxy_pass              http://127.0.0.1:9091/verify;
         proxy_pass_request_body off;
         proxy_set_header        Content-Length "";
+        proxy_set_header        Authorization \$http_authorization;
     }
 
-    location @goauthentik_proxy_signin {
-        internal;
-        add_header Set-Cookie \$auth_cookie;
-        return 302 /outpost.goauthentik.io/start?rd=\$request_uri;
+    location @basic_auth_prompt {
+        add_header WWW-Authenticate 'Basic realm="DevBox Platform"' always;
+        return 401;
     }
 
     location = / {
@@ -433,12 +374,12 @@ server {
     include /etc/nginx/conf.d/devbox-users/*.conf;
 }
 NGINX_EOF
-  ok "nginx: Authentik 認証付きで設定"
+  ok "nginx: LDAP (LLDAP) Basic 認証付きで設定"
 else
-  warn "nginx: 認証なしで設定（Authentik 未設定）"
+  warn "nginx: 認証なしで設定（LLDAP 未設定）"
   cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
 # DevBox Platform - 認証なし設定（install.sh が生成）
-# Authentik を設定したら SKIP_AUTHENTIK=no で install.sh を再実行
+# LLDAP を設定したら SKIP_LLDAP=no で install.sh を再実行
 server {
     listen 80;
     server_name ${DOMAIN};
@@ -464,7 +405,7 @@ echo ""
 echo "次のステップ:"
 echo "  ユーザー追加: sudo bash scripts/adduser.sh <username>"
 echo "  アクセス    : http://${DOMAIN}/<username>/"
-if [[ "$AUTHENTIK_ENABLED" == "yes" ]]; then
-  echo "  Authentik   : http://${DOMAIN}:9000"
+if [[ "$LLDAP_ENABLED" == "yes" ]]; then
+  echo "  LLDAP       : http://${DOMAIN}:17170"
 fi
 echo ""

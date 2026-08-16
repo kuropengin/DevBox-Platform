@@ -7,9 +7,11 @@
 #   --mem    メモリ上限（MemoryMax、例: 4G）         デフォルト: 4G
 #
 # 必要な環境変数（任意）:
-#   AUTHENTIK_URL    例: https://auth.example.com
-#   AUTHENTIK_TOKEN  Authentik APIトークン
-#   DEVBOX_DOMAIN    例: devbox.example.com
+#   LLDAP_URL             例: http://127.0.0.1:17170
+#   LLDAP_BASE_DN         例: dc=devbox,dc=local
+#   LLDAP_ADMIN_USER      LLDAP 管理者ユーザー名
+#   LLDAP_ADMIN_PASSWORD  LLDAP 管理者パスワード
+#   DEVBOX_DOMAIN         例: devbox.example.com
 
 set -euo pipefail
 
@@ -111,12 +113,10 @@ ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpr
 info "nginx 設定を追加中..."
 mkdir -p /etc/nginx/conf.d/devbox-users
 
-# Authentik 有効時は auth_request ブロックを含める
-if [[ "${AUTHENTIK_ENABLED:-no}" == "yes" ]]; then
-  AUTH_BLOCK='    auth_request      /outpost.goauthentik.io/auth/nginx;
-    error_page 401  = @goauthentik_proxy_signin;
-    auth_request_set  $auth_cookie $upstream_http_set_cookie;
-    add_header        Set-Cookie $auth_cookie;'
+# LLDAP 有効時は auth_request ブロックを含める（auth-ldap ブリッジ経由の Basic 認証）
+if [[ "${LLDAP_ENABLED:-no}" == "yes" ]]; then
+  AUTH_BLOCK='    auth_request      /auth-ldap;
+    error_page 401    = @basic_auth_prompt;'
 else
   AUTH_BLOCK=''
 fi
@@ -155,33 +155,52 @@ NGINX_EOF
 nginx -t && systemctl reload nginx
 ok "nginx 設定追加完了 → /etc/nginx/conf.d/devbox-users/${USERNAME}.conf"
 
-# ─── 6. Authentik ユーザー登録（任意） ────────────────────────────────────────
-if [[ -n "${AUTHENTIK_TOKEN:-}" && -n "${AUTHENTIK_URL:-}" ]]; then
-  info "Authentik にユーザーを追加中..."
+# ─── 6. LLDAP ユーザー登録（任意） ──────────────────────────────────────────────
+USER_LDAP_PASS=""
+if [[ -n "${LLDAP_ADMIN_PASSWORD:-}" && -n "${LLDAP_URL:-}" ]]; then
+  info "LLDAP にユーザーを追加中..."
 
-  # ユーザーが存在するか確認
-  EXISTING=$(curl -sf \
-    -H "Authorization: Bearer ${AUTHENTIK_TOKEN}" \
-    "${AUTHENTIK_URL}/api/v3/core/users/?username=${USERNAME}" \
-    | grep -o '"count":[0-9]*' | cut -d: -f2 || echo "0")
+  TOKEN=$(curl -sf -X POST "${LLDAP_URL}/auth/simple/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${LLDAP_ADMIN_USER:-admin}\",\"password\":\"${LLDAP_ADMIN_PASSWORD}\"}" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || echo "")
 
-  if [[ "${EXISTING:-0}" == "0" ]]; then
-    RESP=$(curl -sf \
-      -X POST \
-      -H "Authorization: Bearer ${AUTHENTIK_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "{\"username\":\"${USERNAME}\",\"name\":\"${USERNAME}\",\"is_active\":true}" \
-      "${AUTHENTIK_URL}/api/v3/core/users/") || { warn "Authentik ユーザー作成に失敗しました"; RESP=""; }
+  if [[ -n "$TOKEN" ]]; then
+    # ユーザーが存在するか確認
+    EXISTING=$(curl -sf -X POST "${LLDAP_URL}/api/graphql" \
+      -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+      -d "{\"query\":\"query{user(userId:\\\"${USERNAME}\\\"){id}}\"}" \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(1 if d.get('data',{}).get('user') else 0)" 2>/dev/null || echo "0")
 
-    if [[ -n "$RESP" ]]; then
-      ok "Authentik ユーザー作成完了"
+    if [[ "${EXISTING:-0}" == "0" ]]; then
+      if curl -sf -X POST "${LLDAP_URL}/api/graphql" \
+        -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+        -d "{\"query\":\"mutation{createUser(user:{id:\\\"${USERNAME}\\\",email:\\\"${USERNAME}@${DEVBOX_DOMAIN}\\\"}){id}}\"}" \
+        -o /dev/null; then
+        USER_LDAP_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+        if lldap_set_password \
+          --base-url "${LLDAP_URL}" \
+          --admin-username "${LLDAP_ADMIN_USER:-admin}" \
+          --admin-password "${LLDAP_ADMIN_PASSWORD}" \
+          --username "${USERNAME}" \
+          --password "${USER_LDAP_PASS}" &>/dev/null; then
+          ok "LLDAP ユーザー作成・パスワード設定完了"
+        else
+          warn "LLDAP パスワード設定に失敗しました"
+          USER_LDAP_PASS=""
+        fi
+      else
+        warn "LLDAP ユーザー作成に失敗しました"
+      fi
+    else
+      ok "LLDAP にユーザー '${USERNAME}' は既に存在します"
     fi
   else
-    ok "Authentik にユーザー '${USERNAME}' は既に存在します"
+    warn "LLDAP 管理者トークンの取得に失敗しました"
   fi
 else
-  warn "AUTHENTIK_TOKEN/AUTHENTIK_URL が未設定のため Authentik 登録をスキップ"
-  warn "手動で追加: AUTHENTIK_URL=... AUTHENTIK_TOKEN=... bash adduser.sh ${USERNAME}"
+  warn "LLDAP_ADMIN_PASSWORD/LLDAP_URL が未設定のため LLDAP 登録をスキップ"
+  warn "手動で追加: LLDAP_URL=... LLDAP_ADMIN_PASSWORD=... bash adduser.sh ${USERNAME}"
 fi
 
 # ─── 完了 ─────────────────────────────────────────────────────────────────────
@@ -194,6 +213,11 @@ echo "  ポータル : http://${DEVBOX_DOMAIN}/${USERNAME}/"
 echo "  VS Code  : http://${DEVBOX_DOMAIN}/${USERNAME}/vscode/"
 echo "  GUI      : http://${DEVBOX_DOMAIN}/${USERNAME}/gui/"
 echo ""
+if [[ -n "$USER_LDAP_PASS" ]]; then
+  echo "  ログインID    : ${USERNAME}"
+  echo "  初期パスワード: ${USER_LDAP_PASS}"
+  echo ""
+fi
 echo "サービス状態:"
 echo "  systemctl status devbox@${USERNAME}.target"
 echo "  journalctl -u vscode@${USERNAME}.service -f"

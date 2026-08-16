@@ -1,3 +1,10 @@
 # 機密情報を含む設定ファイル（コミットしない）
 install.env
 *.env
+
+# Python バイトコードキャッシュ
+__pycache__/
+*.pyc
+
+# Claude Code 設定
+.claude/

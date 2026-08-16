@@ -12,7 +12,12 @@ http://devbox.example.com
   /[username]/gui/     → Xpra HTML5 デスクトップ
 ```
 
-認証は **Authentik Forward Auth** で nginx レベルで処理します。
+認証は **LLDAP（LDAP ディレクトリ）+ auth-ldap（自作の nginx auth_request ブリッジ）**
+で nginx レベルの Basic 認証として処理します。LLDAP は dnf（openSUSE Build
+Service 経由の RPM）でインストールでき、auth-ldap は Python 標準ライブラリのみ
+で書かれた小さなスクリプトです。どちらもソースからのビルドが一切不要なため、
+コンテナが使えない環境でもアップデートのたびにビルド環境を整える必要が
+ありません。
 
 ## ファイル構成
 
@@ -25,8 +30,10 @@ devbox-platform/
 │   ├── vscode@.service         # VS Code serve-web
 │   └── xpra@.service           # Xpra HTML5 デスクトップ
 └── scripts/
-    ├── install.sh              # 初回セットアップ（Authentik を含む）
-    └── adduser.sh              # ユーザー追加
+    ├── install.sh              # 初回セットアップ（LLDAP / auth-ldap を含む）
+    ├── adduser.sh              # ユーザー追加
+    └── auth-ldap/
+        └── auth_ldap.py        # nginx auth_request → LDAP bind ブリッジ
 ```
 
 ## 動作環境
@@ -44,7 +51,7 @@ devbox-platform/
 export DEVBOX_DOMAIN="192.168.11.64"
 
 # 管理者パスワードを指定（省略時は自動生成）
-export AUTHENTIK_ADMIN_PASSWORD="yourpassword"
+export LLDAP_ADMIN_PASSWORD="yourpassword"
 
 sudo -E bash scripts/install.sh
 ```
@@ -59,18 +66,19 @@ install.sh が行うこと:
 | XFCE | デスクトップ環境 |
 | nginx | リバースプロキシ |
 | SELinux | `httpd_can_network_connect` を有効化 |
-| firewalld | HTTP / HTTPS / 9000(Authentik) を開放 |
-| **Authentik** | PostgreSQL + Redis + Python 3.12 venv でネイティブインストール |
+| firewalld | HTTP / HTTPS / 17170(LLDAP 管理画面) を開放 |
+| **LLDAP** | dnf（OBS リポジトリの RPM）でネイティブインストール |
+| **auth-ldap** | nginx auth_request 用の LDAP bind ブリッジ（Python 標準ライブラリのみ） |
 | ポータル HTML | `/opt/devbox/portal/` へコピー |
 | systemd ユニット | テンプレートユニットを `/etc/systemd/system/` へインストール |
-| nginx 設定 | Authentik Forward Auth 付きで生成 |
+| nginx 設定 | LDAP Basic 認証（auth-ldap 経由）付きで生成 |
 
-Authentik 認証情報は `/etc/devbox/authentik.env`（権限 600）に保存されます。
+LLDAP 認証情報は `/etc/devbox/lldap.env`（権限 600）に保存されます。
 
-#### Authentik をスキップしたい場合
+#### LLDAP をスキップしたい場合
 
 ```bash
-SKIP_AUTHENTIK=yes DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/install.sh
+SKIP_LLDAP=yes DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/install.sh
 ```
 
 ### 2. ユーザー追加
@@ -88,7 +96,7 @@ adduser.sh が行うこと:
 | ポート割り当て | UID オフセットで自動計算・競合チェック |
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
 | nginx | `/etc/nginx/conf.d/devbox-users/[username].conf` を生成・リロード |
-| Authentik | `AUTHENTIK_TOKEN` がある場合のみ API でユーザー登録 |
+| LLDAP | `LLDAP_ADMIN_PASSWORD` がある場合のみ GraphQL API + `lldap_set_password` でユーザー登録 |
 
 ## systemd 構成
 
@@ -120,8 +128,8 @@ ss -tlnp | grep -E '10000|14500'
 journalctl -u vscode@yamada.service -f
 journalctl -u xpra@yamada.service   -f
 
-# Authentik サービス確認
-systemctl status authentik-server authentik-worker
+# LLDAP / auth-ldap サービス確認
+systemctl status lldap auth-ldap
 ```
 
 ## ポート割り当て
@@ -132,19 +140,34 @@ systemctl status authentik-server authentik-worker
 | 1001 | 10001         | 14501      | :101             |
 | 1002 | 10002         | 14502      | :102             |
 
-## Authentik 構成
+## LLDAP / auth-ldap 構成
 
-install.sh が自動でセットアップします:
+install.sh が自動でセットアップします。LLDAP は RPM パッケージ、auth-ldap は
+リポジトリに含まれる Python 標準ライブラリのみのスクリプトなので、どちらも
+ビルドは一切発生しません。
 
 | コンポーネント | 場所 |
 |---|---|
-| PostgreSQL | `dnf install postgresql-server` |
-| Redis | `dnf install redis` |
-| Python 3.12 | `dnf install python3.12` |
-| Authentik | `/opt/authentik/venv/` (pip install) |
-| 設定ファイル | `/opt/authentik/.env` |
-| 認証情報 | `/etc/devbox/authentik.env` |
+| LLDAP | `dnf install lldap`([openSUSE Build Service](https://software.opensuse.org//download.html?project=home%3AMasgalor%3ALLDAP&package=lldap) の非公式 RPM、GPG 署名済み) |
+| openldap-clients | `dnf install openldap-clients`（RHEL 公式パッケージ、`ldapwhoami` を使用） |
+| auth-ldap | `/opt/devbox/auth-ldap/auth_ldap.py`（本リポジトリ同梱） |
+| LLDAP 設定ファイル | `/etc/lldap/lldap_config.toml` |
+| 認証情報 | `/etc/devbox/lldap.env`（権限 600） |
 
-管理画面: `http://{DEVBOX_DOMAIN}:9000`
+管理画面（Web UI）: `http://{DEVBOX_DOMAIN}:17170`（Base DN: `dc=devbox,dc=local`）
 
-詳細: https://docs.goauthentik.io/docs/providers/proxy/forward_auth
+nginx は各ユーザーの location で `auth_request /auth-ldap;` を発行し、
+`auth-ldap`（127.0.0.1:9091）が Basic 認証のユーザー名/パスワードを
+LLDAP（127.0.0.1:3890）に対して LDAP bind することで認証します。auth-ldap
+自体は localhost のみで待ち受け、外部に公開されません。LLDAP の LDAP
+プロトコル（3890番ポート）も firewalld で開放しないため外部到達不可ですが、
+管理 Web UI（17170番ポート）は管理者の利便性のため意図的に公開しています。
+
+> **注意**: LLDAP の RPM は LLDAP プロジェクト公式ではなく、openSUSE Build
+> Service 上の個人メンテナ（@Masgalor）によるビルドです。LLDAP 本体の
+> リリースそのものは公式リポジトリのものです。
+
+詳細:
+- https://github.com/lldap/lldap
+- https://github.com/lldap/lldap/blob/main/docs/install.md#from-a-package-repository
+- https://nginx.org/en/docs/http/ngx_http_auth_request_module.html
