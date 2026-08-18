@@ -1,6 +1,6 @@
 # DevBox Platform - VS Code 拡張機能一覧
 # 1行1拡張機能ID（publisher.name）。# から始まる行・空行は無視される。
-# install.sh / update-extensions.sh がこのファイルを読んでマスターセットを構築する。
+# install-backend.sh / update-extensions.sh がこのファイルを読んでマスターセットを構築する。
 
 vscjava.vscode-java-pack
 mhutchie.git-graph

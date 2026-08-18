@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DevBox Platform - VS Code 拡張機能の共通処理
-# install.sh / adduser.sh / update-extensions.sh から source して使う。
+# install-backend.sh / adduser-backend.sh / update-extensions.sh から source して使う。
 #
 # 設計:
 #   - 拡張機能のインストール/更新は root がマスターディレクトリ

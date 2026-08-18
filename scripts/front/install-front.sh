@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# DevBox Platform - インストールスクリプト (RHEL 9 系)
+# DevBox Platform - front サーバー インストールスクリプト (RHEL 9 系)
 # 対応: AlmaLinux 9 / Rocky Linux 9 / RHEL 9
-# 使い方: sudo bash install.sh
+# 使い方: sudo bash install-front.sh
+#
+# front サーバーの役割: 認証（LLDAP + LemonLDAP::NG）とポータル配信、
+# および各 backend サーバーへの認証済みリバースプロキシ。
+# ユーザーごとの実体（vscode@/xpra@ サービスや Java/Tomcat 等の開発ツール）は
+# install-backend.sh を実行した backend サーバー側に置く。
+#
+# 1台構成にしたい場合は、このスクリプトと install-backend.sh を同一ホストで
+# 実行すればよい（FRONT_ALLOWED_SOURCE=127.0.0.1 を指定）。front 用と
+# backend 用の nginx 設定はファイル名・リッスンポートが分かれているため
+# 同居しても衝突しない。
 #
 # 環境変数（任意）:
 #   DEVBOX_DOMAIN          例: devbox.example.com  (デフォルト: devbox.example.com)
@@ -18,21 +28,13 @@ TLS_DIR="/etc/devbox/tls"
 TLS_CERT="${TLS_DIR}/devbox.crt"
 TLS_KEY="${TLS_DIR}/devbox.key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
-# shellcheck source=lib-vscode-extensions.sh
-source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
-# shellcheck source=lib-tomcat.sh
-source "${SCRIPT_DIR}/lib-tomcat.sh"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
-ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+# shellcheck source=../lib-common.sh
+source "${SCRIPT_DIR}/../lib-common.sh"
 
 # .env ファイルが存在すれば読み込む（環境変数を上書き）
-for env_path in "${REPO_DIR}/install.env" "${SCRIPT_DIR}/install.env" "/etc/devbox/install.env"; do
+for env_path in "${REPO_DIR}/install-front.env" "${SCRIPT_DIR}/install-front.env" "/etc/devbox/install-front.env"; do
   if [[ -f "$env_path" ]]; then
     info ".env を読み込み中: ${env_path}"
     set -a
@@ -69,7 +71,7 @@ fi
 setup_lldap() {
   info "LLDAP をインストール中（RPM パッケージ、ビルド不要）..."
 
-  mkdir -p /etc/devbox /etc/devbox/users
+  mkdir -p /etc/devbox
 
   # ─── OBS リポジトリ登録 ──────────────────────────────────────────────────────
   if [[ ! -f /etc/yum.repos.d/lldap.repo ]]; then
@@ -152,7 +154,7 @@ setup_lemonldap() {
 
   # パッケージが /etc/nginx/conf.d/ に配置するサンプル設定（server_name が
   # auth.example.com 等のプレースホルダードメインで、server{} で囲われて
-  # いないものもある）は devbox.conf と競合する（例: handler-nginx.conf の
+  # いないものもある）は devbox-front.conf と競合する（例: handler-nginx.conf の
   # error_page が http コンテキストのデフォルトとして効いてしまう）ため削除する。
   rm -f /etc/nginx/conf.d/portal-nginx.conf \
         /etc/nginx/conf.d/manager-nginx.conf \
@@ -237,7 +239,7 @@ JSON_EOF
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash install.sh"
+[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash install-front.sh"
 
 if ! grep -qiE 'rhel|almalinux|rocky' /etc/os-release 2>/dev/null; then
   warn "RHEL 9 系以外の環境です。続行しますが動作を保証しません"
@@ -247,7 +249,7 @@ MAJOR_VER=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
 
 echo ""
 echo "╔══════════════════════════════════╗"
-echo "║   DevBox Platform Installer      ║"
+echo "║   DevBox Platform - front        ║"
 echo "║   RHEL 9 系                      ║"
 echo "╚══════════════════════════════════╝"
 echo ""
@@ -255,135 +257,14 @@ echo ""
 # ─── 1. EPEL + 基本パッケージ ─────────────────────────────────────────────────
 info "EPEL リポジトリと基本パッケージをインストール中..."
 dnf install -y epel-release
-dnf install -y curl wget git python3 openssl rsync tar
+dnf install -y curl python3 openssl
 
 dnf config-manager --set-enabled crb 2>/dev/null || \
   dnf config-manager --set-enabled powertools 2>/dev/null || \
   warn "CRB/PowerTools の有効化に失敗しました（続行します）"
 ok "基本パッケージ完了"
 
-# ─── 2. VS Code（code serve-web） ─────────────────────────────────────────────
-if ! command -v code &>/dev/null; then
-  info "VS Code をインストール中..."
-  rpm --import https://packages.microsoft.com/keys/microsoft.asc
-  cat > /etc/yum.repos.d/vscode.repo << 'REPO_EOF'
-[code]
-name=Visual Studio Code
-baseurl=https://packages.microsoft.com/yumrepos/vscode
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.microsoft.com/keys/microsoft.asc
-REPO_EOF
-  dnf install -y code
-  ok "VS Code インストール完了: $(code --version 2>&1 | head -1)"
-else
-  ok "VS Code は導入済み: $(code --version 2>&1 | head -1)"
-fi
-
-# ─── 3. Java（Eclipse Temurin） ───────────────────────────────────────────────
-# 8（レガシーアプリ向け）と 25（最新 LTS）を並行してインストールする。
-# パッケージ名がバージョンごとに分かれている（temurin-N-jdk）ため、
-# update-alternatives 経由で共存でき、通常の dnf update で追随できる。
-if [[ ! -f /etc/yum.repos.d/adoptium.repo ]]; then
-  rpm --import https://packages.adoptium.net/artifactory/api/gpg/key/public
-
-  # Adoptium は AlmaLinux/Rocky 向けの専用リポジトリを提供していないため、
-  # RHEL 系はすべて "rhel" のリポジトリパスを利用する。
-  cat > /etc/yum.repos.d/adoptium.repo << 'REPO_EOF'
-[Adoptium]
-name=Adoptium
-baseurl=https://packages.adoptium.net/artifactory/rpm/rhel/$releasever/$basearch
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.adoptium.net/artifactory/api/gpg/key/public
-REPO_EOF
-fi
-
-for jdk_version in 8 25; do
-  if rpm -q "temurin-${jdk_version}-jdk" &>/dev/null; then
-    ok "Java ${jdk_version}（Temurin）は導入済み"
-  else
-    info "Java ${jdk_version}（Temurin）をインストール中..."
-    dnf install -y "temurin-${jdk_version}-jdk"
-    ok "Java ${jdk_version} インストール完了"
-  fi
-done
-
-# ─── 4. Apache Tomcat（9 / 11） ────────────────────────────────────────────────
-# Tomcat は公式の dnf/yum リポジトリが無い（EPEL の "tomcat" は9系1つのみで
-# 複数メジャーバージョンを並存させられない）ため、archive.apache.org の
-# 公式 tarball を取得して /opt/devbox/tomcat/tomcat{9,11} に展開する。
-# 詳細は scripts/lib-tomcat.sh を参照。
-info "Apache Tomcat（9 / 11）をインストール中..."
-if tomcat_install_all 9 11; then
-  ok "Apache Tomcat インストール完了 → ${TOMCAT_BASE_DIR}"
-else
-  warn "Apache Tomcat の一部バージョンのインストールに失敗しました（続行します）"
-fi
-
-# ─── 5. Claude Code CLI ────────────────────────────────────────────────────────
-# システム全体に一度だけインストールする（dnf パッケージ、ユーザーごとの
-# 個別インストールは不要）。VS Code の Claude 拡張機能はこの CLI を起動する
-# ように adduser.sh がユーザーごとに設定する（claudeCode.claudeProcessWrapper）。
-# CLI 自体の設定・セッション状態は $HOME/.claude/ に保存されるため、
-# バイナリを共有していてもユーザー間で干渉しない。
-if ! command -v claude &>/dev/null; then
-  info "Claude Code CLI をインストール中..."
-  cat > /etc/yum.repos.d/claude-code.repo << 'REPO_EOF'
-[claude-code]
-name=Claude Code
-baseurl=https://downloads.claude.ai/claude-code/rpm/stable
-enabled=1
-gpgcheck=1
-gpgkey=https://downloads.claude.ai/keys/claude-code.asc
-REPO_EOF
-  dnf install -y claude-code
-  ok "Claude Code CLI インストール完了: $(claude --version 2>&1 | head -1)"
-else
-  ok "Claude Code CLI は導入済み: $(claude --version 2>&1 | head -1)"
-fi
-CLAUDE_BIN="$(command -v claude)"
-
-# ─── 6. VS Code 拡張機能（マスターセットを root が管理） ─────────────────────
-# ここでは root 専用のマスターディレクトリに拡張機能をインストールするだけで、
-# 実際の配布は adduser.sh（新規ユーザー作成時）と update-extensions.sh
-# （既存ユーザーへの更新反映）が行う。各ユーザーには独立したコピーを
-# 配布し、本人には読み取り専用の権限しか与えないため、
-#   - ユーザー間で拡張機能ディレクトリを共有しない（同時書き込みによる
-#     extensions.json 破損などの干渉が起きない）
-#   - 追加インストール・アンインストールは root（本スクリプト経由）以外
-#     には行えない
-# という2点を両立する。
-info "VS Code 拡張機能（マスターセット）を準備中..."
-vscode_ext_build_master
-vscode_ext_sync_to_all_users
-ok "VS Code 拡張機能マスターセット準備完了 → ${VSCODE_EXT_MASTER_DIR}"
-
-# ─── 7. Xpra + xpra-html5 ─────────────────────────────────────────────────────
-if ! command -v xpra &>/dev/null; then
-  info "Xpra をインストール中..."
-  dnf install -y xpra xorg-x11-server-Xvfb xauth xorg-x11-utils \
-    dejavu-sans-fonts dbus-x11 xterm
-
-  info "xpra-html5 をソースからインストール中..."
-  git clone --depth=1 https://github.com/Xpra-org/xpra-html5 /tmp/xpra-html5
-  cd /tmp/xpra-html5 && python3 ./setup.py install
-  cd / && rm -rf /tmp/xpra-html5
-  ok "Xpra インストール完了: $(xpra --version 2>&1 | head -1)"
-else
-  ok "Xpra は導入済み: $(xpra --version 2>&1 | head -1)"
-fi
-
-# ─── 8. XFCE デスクトップ ─────────────────────────────────────────────────────
-if ! command -v xfce4-session &>/dev/null; then
-  info "XFCE をインストール中..."
-  dnf install -y xfce4-session xfce4-terminal xfwm4 xfdesktop xfce4-panel Thunar
-  ok "XFCE インストール完了"
-else
-  ok "XFCE は導入済み"
-fi
-
-# ─── 9. nginx ──────────────────────────────────────────────────────────────────
+# ─── 2. nginx ──────────────────────────────────────────────────────────────────
 if ! command -v nginx &>/dev/null; then
   info "nginx をインストール中..."
   dnf install -y nginx
@@ -391,7 +272,7 @@ fi
 systemctl enable nginx
 ok "nginx 準備完了: $(nginx -v 2>&1)"
 
-# ─── 10. TLS 証明書（自己署名） ─────────────────────────────────────────────────
+# ─── 3. TLS 証明書（自己署名） ─────────────────────────────────────────────────
 # VS Code Web の webview（拡張機能の Webview、Markdown プレビュー等）はブラウザの
 # Web Crypto API（crypto.subtle）を使うが、これは HTTPS（セキュアコンテキスト）
 # でしか利用できない。閉域網でも動くよう、外部の認証局を使わない自己署名証明書
@@ -409,23 +290,24 @@ else
   ok "TLS 証明書は既存のものを使用: ${TLS_CERT}"
 fi
 
-# ─── 11. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
+# ─── 4. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
 if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
   info "SELinux ポリシーを設定中..."
   setsebool -P httpd_can_network_connect 1 || warn "setsebool に失敗しました（続行します）"
   ok "SELinux: httpd_can_network_connect 有効"
 fi
 
-# ─── 12. firewalld — HTTP/HTTPS を開放 ─────────────────────────────────────────
+# ─── 5. firewalld — HTTPS を開放 ───────────────────────────────────────────────
+# front は 443 のみで待ち受ける（80 は backend 専用のため front では使わない。
+# 詳細は下記 nginx メイン設定のコメント参照）。
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  info "firewalld で HTTP/HTTPS を開放中..."
-  firewall-cmd --permanent --add-service=http
+  info "firewalld で HTTPS を開放中..."
   firewall-cmd --permanent --add-service=https
   firewall-cmd --reload
   ok "firewalld 設定完了"
 fi
 
-# ─── 13. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
+# ─── 6. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
 LLDAP_ENABLED="no"
 LLDAP_ADMIN_URL="http://127.0.0.1:17170"
 
@@ -441,9 +323,9 @@ else
   fi
 fi
 
-# ─── 14. ディレクトリ作成 ──────────────────────────────────────────────────────
+# ─── 7. ディレクトリ作成 ──────────────────────────────────────────────────────
 info "ディレクトリを作成中..."
-mkdir -p "${DEVBOX_DIR}/portal" /etc/devbox/users /etc/nginx/conf.d/devbox-users
+mkdir -p "${DEVBOX_DIR}/portal" /etc/devbox/registrations /etc/nginx/conf.d/devbox-front-users
 
 if command -v restorecon &>/dev/null; then
   restorecon -Rv "${DEVBOX_DIR}/portal" 2>/dev/null || true
@@ -452,26 +334,29 @@ elif command -v chcon &>/dev/null; then
 fi
 ok "ディレクトリ作成完了"
 
-# ─── 15. ポータル HTML ────────────────────────────────────────────────────────
+# ─── 8. ポータル HTML ─────────────────────────────────────────────────────────
 info "ポータル HTML をコピー中..."
 cp "${REPO_DIR}/portal/index.html" "${DEVBOX_DIR}/portal/index.html"
 ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
-# ─── 16. systemd テンプレートユニット ────────────────────────────────────────
-info "systemd ユニットをインストール中..."
-for unit in devbox@.target vscode@.service xpra@.service; do
-  cp "${REPO_DIR}/systemd/${unit}" "/etc/systemd/system/${unit}"
-done
-systemctl daemon-reload
-ok "systemd ユニットインストール完了"
-
-# ─── 17. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
+# ─── 9. プラットフォーム設定を保存（register-user.sh が参照） ────────────────
 LLDAP_ADMIN_USER=""
 LLDAP_ADMIN_PASSWORD=""
 [[ -f /etc/devbox/lldap.env ]] && {
   LLDAP_ADMIN_USER=$(grep '^LLDAP_ADMIN_USER=' /etc/devbox/lldap.env | cut -d= -f2 || echo "")
   LLDAP_ADMIN_PASSWORD=$(grep '^LLDAP_ADMIN_PASSWORD=' /etc/devbox/lldap.env | cut -d= -f2 || echo "")
 }
+
+# backend の 80 番ポートは front からのプロキシしか受け付けないよう
+# firewalld で制限するが、それだけに頼らない多層防御として、このトークンを
+# 各 backend にも配布し、front→backend 間の全リクエストに付与・検証させる
+# （install-backend.sh 側。firewalld が無効/誤設定でも直接アクセスは拒否される）。
+# 既存インストールを再実行した場合は既存の値を使い回す。
+DEVBOX_INTERNAL_TOKEN="${DEVBOX_INTERNAL_TOKEN:-}"
+if [[ -z "$DEVBOX_INTERNAL_TOKEN" && -f /etc/devbox/platform.conf ]]; then
+  DEVBOX_INTERNAL_TOKEN=$(grep '^DEVBOX_INTERNAL_TOKEN=' /etc/devbox/platform.conf | cut -d= -f2 || echo "")
+fi
+[[ -z "$DEVBOX_INTERNAL_TOKEN" ]] && DEVBOX_INTERNAL_TOKEN=$(openssl rand -hex 32)
 
 cat > /etc/devbox/platform.conf << PLATFORM_EOF
 DEVBOX_DOMAIN=${DOMAIN}
@@ -480,16 +365,16 @@ LLDAP_BASE_DN=${LLDAP_BASE_DN}
 LLDAP_ADMIN_USER=${LLDAP_ADMIN_USER}
 LLDAP_ADMIN_PASSWORD=${LLDAP_ADMIN_PASSWORD}
 LLDAP_ENABLED=${LLDAP_ENABLED}
-CLAUDE_BIN=${CLAUDE_BIN}
+DEVBOX_INTERNAL_TOKEN=${DEVBOX_INTERNAL_TOKEN}
 PLATFORM_EOF
 chmod 600 /etc/devbox/platform.conf
 
-# ─── 18. nginx メイン設定 ─────────────────────────────────────────────────────
+# ─── 10. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
 
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
-  cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
-# DevBox Platform - メインサーバー設定（install.sh が生成）
+  cat > /etc/nginx/conf.d/devbox-front.conf << NGINX_EOF
+# DevBox Platform - front メインサーバー設定（install-front.sh が生成）
 map \$lmlocation \$lmerror_location {
     ~^      \$lmlocation;
     default @lmAuth401;
@@ -497,11 +382,9 @@ map \$lmlocation \$lmerror_location {
 upstream llng_upstream {
     server unix:/run/llng-fastcgi-server/llng-fastcgi.sock;
 }
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
+# backend サーバーは 80 番ポートしか開放できないため、front は 80 番を
+# 使わない（HTTP→HTTPS の自動リダイレクトは提供しない）。ユーザーは
+# https:// を直接指定してアクセスすること。
 server {
     listen 443 ssl;
     server_name ${DOMAIN};
@@ -511,10 +394,10 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     # \$lmlocation・\$original_uri は本来ユーザー毎の nginx 設定
-    # （devbox-users/*.conf）内で set / auth_request_set により定義されるが、
-    # まだ一人もユーザーを追加していないときはその宣言がどこにも存在せず、
+    # （devbox-front-users/*.conf）内で set / auth_request_set により定義されるが、
+    # まだ一人もユーザーを登録していないときはその宣言がどこにも存在せず、
     # map ディレクティブや /lmauth の参照先が見つからずに nginx の設定検証が
-    # 失敗する。ここで空文字のデフォルトを宣言し、devbox.conf 単体で常に
+    # 失敗する。ここで空文字のデフォルトを宣言し、devbox-front.conf 単体で常に
     # 有効な設定になるようにする。
     set \$lmlocation "";
     set \$original_uri "";
@@ -581,20 +464,18 @@ server {
         add_header Content-Type text/plain;
     }
 
-    include /etc/nginx/conf.d/devbox-users/*.conf;
+    include /etc/nginx/conf.d/devbox-front-users/*.conf;
 }
 NGINX_EOF
   ok "nginx: LemonLDAP::NG（専用ログイン画面 + LDAP 認証）付きで設定"
 else
   warn "nginx: 認証なしで設定（LLDAP / LemonLDAP::NG 未設定）"
-  cat > /etc/nginx/conf.d/devbox.conf << NGINX_EOF
-# DevBox Platform - 認証なし設定（install.sh が生成）
-# LLDAP を設定したら SKIP_LLDAP=no で install.sh を再実行
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
+  cat > /etc/nginx/conf.d/devbox-front.conf << NGINX_EOF
+# DevBox Platform - front 認証なし設定（install-front.sh が生成）
+# LLDAP を設定したら SKIP_LLDAP=no で install-front.sh を再実行
+# backend サーバーは 80 番ポートしか開放できないため、front は 80 番を
+# 使わない（HTTP→HTTPS の自動リダイレクトは提供しない）。ユーザーは
+# https:// を直接指定してアクセスすること。
 server {
     listen 443 ssl;
     server_name ${DOMAIN};
@@ -608,7 +489,7 @@ server {
         add_header Content-Type text/plain;
     }
 
-    include /etc/nginx/conf.d/devbox-users/*.conf;
+    include /etc/nginx/conf.d/devbox-front-users/*.conf;
 }
 NGINX_EOF
 fi
@@ -618,13 +499,25 @@ nginx -t && systemctl start nginx && ok "nginx 設定完了" || die "nginx 設�
 # ─── 完了 ─────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  インストール完了！${NC}"
+echo -e "${GREEN}  front インストール完了！${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "次のステップ:"
-echo "  ユーザー追加: sudo bash scripts/adduser.sh <username>"
-echo "  アクセス    : https://${DOMAIN}/<username>/"
+echo "  1. backend サーバーで scripts/backend/install-backend.sh を実行"
+echo "     （FRONT_ALLOWED_SOURCE=<このホストのIP/CIDR> と、下記の"
+echo "      DEVBOX_INTERNAL_TOKEN を install-backend.env に指定）"
+echo "  2. backend で scripts/backend/adduser-backend.sh <username> を実行してユーザーを作成"
+echo "  3. この front サーバーで"
+echo "     scripts/front/register-user.sh <username> --backend <backendのIP> を実行して登録"
+echo ""
+echo -e "  ${YELLOW}DEVBOX_INTERNAL_TOKEN${NC}（backend の install-backend.env にそのままコピーしてください）:"
+echo "  ${DEVBOX_INTERNAL_TOKEN}"
+echo ""
+echo "  ※ このトークンは front↔backend間の共有シークレットです。他人に見せず、"
+echo "     /etc/devbox/platform.conf（権限600）にのみ保存されています。"
+echo ""
+echo "  アクセス: https://${DOMAIN}/<username>/"
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
-  echo "  LLDAP       : https://${DOMAIN}/lldap/"
+  echo "  LLDAP   : https://${DOMAIN}/lldap/"
 fi
 echo ""

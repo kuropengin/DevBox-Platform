@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # DevBox Platform - Claude Code CLI 関連の共通処理
-# adduser.sh から source して使う。
+# adduser-backend.sh から source して使う。
 #
 # 設計:
-#   - Claude Code CLI 本体（/usr/bin/claude）は install.sh がシステム全体に
-#     一度だけインストールする。CLI 自体の設定・セッション状態は
+#   - Claude Code CLI 本体（/usr/bin/claude）は install-backend.sh が backend
+#     サーバーごとに一度だけインストールする。CLI 自体の設定・セッション状態は
 #     $HOME/.claude/ に保存される仕組みのため、バイナリを共有していても
 #     ユーザー間で干渉しない。
 #   - VS Code の Claude 拡張機能（anthropic.claude-code）はデフォルトでは

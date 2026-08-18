@@ -1,64 +1,161 @@
 # DevBox Platform
 
 RHEL 9 系（AlmaLinux 9 / Rocky Linux 9）で VS Code + Linux デスクトップ環境を
-ユーザーごとに提供するプラットフォームです。
+ユーザーごとに提供するプラットフォームです。**front（認証 + ポータル配信）**
+と **backend（ユーザーごとの実体・複数台に水平分割可能）** の2層構成で、
+ユーザー数の増加に応じて backend を増設できます。1台構成にもできます
+（[1台構成にする場合](#1台構成にする場合)を参照）。
+
+## アーキテクチャ
+
+```
+インターネット
+   │ HTTPS(443)
+   ▼
+┌────────────────────────────────┐
+│ front（1台）                      │
+│  - nginx（TLS終端・公開、443のみ）    │
+│  - LLDAP + LemonLDAP::NG           │  ← 認証はここに一元化
+│  - ポータル HTML（静的）             │
+│  - /{user}/vscode|gui/ を           │
+│    認証後に該当 backend の            │
+│    80番へ proxy_pass                │
+└──────────────────┬───────────────┘
+                   │ HTTP(80) 平文・プライベートネットワーク限定
+                   │ （firewalldでfrontの送信元IPのみ許可）
+      ┌────────────┼────────────┐
+      ▼            ▼            ▼
+┌───────────┐┌───────────┐┌───────────┐
+│ backend1    ││ backend2    ││ backend N   │  ← 何台でも追加可
+│ nginx(local)  ││              ││              │
+│ vscode@       ││ vscode@      ││ vscode@      │
+│ xpra@         ││ xpra@        ││ xpra@        │
+│ Java/Tomcat/  ││   同左         ││   同左         │
+│ 拡張機能/Claude ││              ││              │
+└───────────┘└───────────┘└───────────┘
+```
+
+- **front**: 外部公開する唯一の窓口。TLS終端（443のみ、80は使わない）、
+  LLDAP + LemonLDAP::NG による認証、静的ポータルHTMLの配信、認証後の
+  backend へのリバースプロキシを行う。ユーザーの実体（Linuxアカウントや
+  systemd サービス）は持たない。
+- **backend**: ユーザーの実体（Linux アカウント、`vscode@`/`xpra@`
+  systemd サービス、Java/Tomcat/VS Code拡張機能/Claude Code CLI 等の
+  開発ツール一式）を持つ。認証は行わず、front からのプロキシのみを
+  ローカルの nginx（**80番のみ**、平文HTTP）で受け付ける。何台でも追加
+  できる。backend で開放できるポートが80番に限られる環境を想定し、
+  front は逆に80番を使わない（下記参照）ことで、front/backendを
+  同一ホストに同居させても衝突しないようにしている。
+- front と backend 間の通信は平文HTTPだが、backend 側の firewalld で
+  front の送信元IPのみに制限することで保護する（front↔backend間は
+  プライベートネットワークであることが前提）。
+- front は 80 番を一切使わない（HTTP→HTTPS の自動リダイレクトは提供
+  しない。ユーザーは常に `https://` を直接指定してアクセスする）。
+  これにより front と backend が同一ホストに同居しても、80番は
+  backend専用・443番はfront専用として衝突なく共存できる。
+- URL パス構造（`/{username}/`, `/{username}/vscode/`, `/{username}/gui/`）は
+  front から見ても backend から見ても同じで、front は認証後そのパスの
+  ままプロキシするだけ。backend 側のローカル nginx がユーザーごとの
+  ローカルポート（vscode@/xpra@）へ最終的に振り分ける。
+
+### backend の 80 番に直接アクセスされた場合の保護
+
+backend の nginx はそれ自体ではログイン認証を行わない（front で認証済みの
+通信だけが来る前提）ため、**この内部ポートへの直接アクセスを防ぐこと自体
+が認証の一部**です。単一の対策に依存しないよう、二重に防御しています。
+
+| 層 | 内容 | 破られると… |
+|---|---|---|
+| ネットワーク（firewalld） | backend の80番は `FRONT_ALLOWED_SOURCE` で指定した送信元IPからしか受け付けない | 同一ネットワーク上の別ホストなど、許可された送信元になりすませる/そこから到達できる相手からは通る |
+| アプリケーション（共有シークレット） | front は `install-front.sh` が生成した `DEVBOX_INTERNAL_TOKEN` を `X-Devbox-Token` ヘッダとして全リクエストに付与し、backend の nginx が一致しなければ **403** で拒否する（`X-Devbox-Token` が無い/違う直接アクセスは、firewalld を通過できたとしてもここで止まる） | トークンそのものが漏えいした場合（下記参照） |
+
+つまり、firewalld が無効・誤設定であっても、`DEVBOX_INTERNAL_TOKEN` を
+知らない相手が backend:80 に直接アクセスしても 403 で弾かれます。逆に、
+`DEVBOX_INTERNAL_TOKEN` は front→backend間だけで完結させ、以下のように
+漏えいを防いでいます:
+
+- backend の `devbox-backend.conf`（トークンを平文で含む）は `chmod 640
+  root:root` にし、devbox の一般ユーザー（VS Code のターミナル経由でも）
+  からは読めないようにしている
+- front の `devbox-front-users/{username}.conf`（同上）も同様に `chmod 640
+  root:root`
+- backend が `vscode@`/`xpra@` へ最終的にプロキシする際は `X-Devbox-Token`
+  ヘッダを明示的に消しており（`proxy_set_header X-Devbox-Token "";`）、
+  ユーザー本人のプロセスにも渡らない
+
+このトークンは `/etc/devbox/platform.conf`（front、権限600）に保存されて
+おり、`install-backend.sh` はこの値が `DEVBOX_INTERNAL_TOKEN` として
+渡されていないと**エラーで停止**します（設定忘れで無防備な backend が
+できてしまうことを防ぐため）。
 
 ## アクセス構成
 
 ```
 https://devbox.example.com
-  /[username]/         → ポータルページ（静的 HTML）
-  /[username]/vscode/  → VS Code (code serve-web)
-  /[username]/gui/     → Xpra HTML5 デスクトップ
+  /[username]/         → ポータルページ（静的 HTML、front配信）
+  /[username]/vscode/  → VS Code (code serve-web、backend上で実行)
+  /[username]/gui/     → Xpra HTML5 デスクトップ（backend上で実行）
 ```
 
 認証は **LLDAP（LDAP ディレクトリ）+ LemonLDAP::NG（ログイン画面 + nginx
-Forward Auth）** で処理します。LLDAP は dnf（openSUSE Build Service 経由の
-RPM）、LemonLDAP::NG は EPEL 公式パッケージでインストールでき、どちらも
-ソースからのビルドが一切不要です。コンテナが使えない環境でもアップデートの
-たびにビルド環境を整える必要がありません。
+Forward Auth）** で処理します（front サーバーのみ）。LLDAP は dnf（openSUSE
+Build Service 経由の RPM）、LemonLDAP::NG は EPEL 公式パッケージでインストール
+でき、どちらもソースからのビルドが一切不要です。
 
 セッション Cookie を使った専用ログイン画面（`/_auth/`）を持ち、HTTP Basic
 認証のようにリクエスト毎に資格情報を送り続けることはありません。
 
-通信は install.sh が自動生成する**自己署名証明書**で HTTPS 化されており
-（HTTP は 443 へ自動リダイレクト）、初回アクセス時にブラウザの警告を
-承認する必要があります。VS Code Web の webview（拡張機能の Webview、
-Markdown プレビュー等）はブラウザの Web Crypto API を使うため HTTPS
-（セキュアコンテキスト）必須で、これが無いと動作しません。
+通信は install-front.sh が自動生成する**自己署名証明書**で HTTPS 化されて
+おり、初回アクセス時にブラウザの警告を承認する必要があります。VS Code Web
+の webview（拡張機能の Webview、Markdown プレビュー等）はブラウザの
+Web Crypto API を使うため HTTPS（セキュアコンテキスト）必須で、これが無い
+と動作しません。front は 80 番ポートを使わない（backend が 80 番のみ
+開放できる環境を想定しているため）ので、**HTTP→HTTPS の自動リダイレクトは
+提供されません**。必ず `https://` を明示してアクセスしてください。
+front↔backend間は平文HTTPですが、これは外部非公開のプライベートネット
+ワーク上の通信です。
 
 ## ファイル構成
 
 ```
 devbox-platform/
 ├── portal/
-│   └── index.html                    # ユーザーポータル（静的 HTML）
+│   └── index.html                    # ユーザーポータル（静的 HTML、front配信）
 ├── systemd/
-│   ├── devbox@.target                # DevBox 管理ターゲット（テンプレート）
-│   ├── vscode@.service               # VS Code serve-web
-│   └── xpra@.service                 # Xpra HTML5 デスクトップ
+│   ├── devbox@.target                # DevBox 管理ターゲット（backendに配置）
+│   ├── vscode@.service               # VS Code serve-web（backendに配置）
+│   └── xpra@.service                 # Xpra HTML5 デスクトップ（backendに配置）
 └── scripts/
-    ├── install.sh                    # 初回セットアップ（LLDAP / LemonLDAP::NG を含む）
-    ├── adduser.sh                    # ユーザー追加
-    ├── update-extensions.sh          # VS Code 拡張機能マスターセットの更新・全ユーザー配布
-    ├── update-tomcat.sh              # Tomcat 9 / 11 の更新
-    ├── update-all.sh                 # dnf update + 拡張機能更新 + Tomcat 更新を一括実行
-    ├── lib-vscode-extensions.sh      # 拡張機能マスター管理・配布の共通処理
-    ├── vscode-extensions.list        # インストールする拡張機能 ID の一覧
-    ├── lib-tomcat.sh                 # Tomcat tarball 導入・更新の共通処理
-    └── lib-claude.sh                 # Claude Code CLI 連携の共通処理（adduser.sh が source）
+    ├── lib-common.sh                 # 全スクリプト共通のログ関数・ユーザー名検証（front/backend共通）
+    ├── front/
+    │   ├── install-front.sh          # front セットアップ（LLDAP / LemonLDAP::NG を含む）
+    │   ├── register-user.sh          # front でユーザーを登録（認証・ルーティング）
+    │   └── deregister-user.sh        # front でユーザーの登録を解除
+    └── backend/
+        ├── install-backend.sh        # backend セットアップ（開発ツール一式）
+        ├── adduser-backend.sh        # backend でユーザーの実体を作成
+        ├── deluser-backend.sh        # backend でユーザーの実体を削除
+        ├── update-extensions.sh      # VS Code 拡張機能マスターセットの更新・全ユーザー配布
+        ├── update-tomcat.sh          # Tomcat 9 / 11 の更新
+        ├── update-all.sh             # dnf update + 拡張機能更新 + Tomcat 更新を一括実行
+        ├── lib-vscode-extensions.sh  # 拡張機能マスター管理・配布の共通処理
+        ├── vscode-extensions.list    # インストールする拡張機能 ID の一覧
+        ├── lib-tomcat.sh             # Tomcat tarball 導入・更新の共通処理
+        └── lib-claude.sh             # Claude Code CLI 連携の共通処理
 ```
 
 ## 動作環境
 
-- AlmaLinux 9 / Rocky Linux 9 / RHEL 9
+- AlmaLinux 9 / Rocky Linux 9 / RHEL 9（front・backend とも）
 - SELinux: Enforcing のまま動作（自動設定。ただし LemonLDAP::NG 部分は
   Enforcing 環境での動作を未検証、[LemonLDAP::NG / LLDAP 構成](#lemonldapng--lldap-構成) 参照）
 - コンテナ / VM 不使用（すべてネイティブインストール）
+- front と backend の間はプライベートネットワークで到達可能であること
+  （同一ホストでもよい。[1台構成にする場合](#1台構成にする場合)を参照）
 
 ## セットアップ
 
-### 1. インストール
+### 1. front サーバーのインストール
 
 ```bash
 # ドメインまたは IP アドレスを指定
@@ -67,36 +164,28 @@ export DEVBOX_DOMAIN="192.168.11.64"
 # 管理者パスワードを指定（省略時は自動生成）
 export LLDAP_ADMIN_PASSWORD="yourpassword"
 
-sudo -E bash scripts/install.sh
+sudo -E bash scripts/front/install-front.sh
 ```
 
-install.sh が行うこと:
+install-front.sh が行うこと:
 
 | ステップ | 内容 |
 |---------|------|
-| EPEL + 基本パッケージ | epel-release, curl, wget, git, python3, openssl, rsync, tar |
-| VS Code | Microsoft rpm リポジトリから `code` をインストール |
-| Java | Adoptium rpm リポジトリから `temurin-8-jdk` / `temurin-25-jdk`（Java 8・25）を並行インストール |
-| **Apache Tomcat** | archive.apache.org の公式 tarball から 9 系・11 系を並行インストール（詳細は[後述](#apache-tomcat)） |
-| **Claude Code CLI** | Anthropic rpm リポジトリから `claude-code` をインストール（詳細は[後述](#claude-code-cli)） |
-| **VS Code 拡張機能** | `scripts/vscode-extensions.list` に基づきマスターセットを構築し、既存の全ユーザーへ配布（詳細は[後述](#vs-code-拡張機能)） |
-| Xpra + xpra-html5 | EPEL + ソースビルド |
-| XFCE | デスクトップ環境 |
-| nginx | リバースプロキシ |
-| **TLS 証明書** | 自己署名証明書を生成（`/etc/devbox/tls/`）。HTTP は 443 へリダイレクト |
+| EPEL + 基本パッケージ | epel-release, curl, python3, openssl |
+| nginx | リバースプロキシ・TLS終端 |
+| **TLS 証明書** | 自己署名証明書を生成（`/etc/devbox/tls/`）。443 のみで待受（80は使わない） |
 | SELinux | `httpd_can_network_connect` を有効化 |
-| firewalld | HTTP / HTTPS を開放（LLDAP・LemonLDAP::NG は localhost のみで待受） |
+| firewalld | HTTPS のみ全世界に開放（80は開放しない。LLDAP・LemonLDAP::NG は localhost のみで待受） |
 | **LLDAP** | dnf（OBS リポジトリの RPM）でネイティブインストール |
 | **LemonLDAP::NG** | dnf（EPEL 公式パッケージ）でネイティブインストール |
 | ポータル HTML | `/opt/devbox/portal/` へコピー |
-| systemd ユニット | テンプレートユニットを `/etc/systemd/system/` へインストール |
-| nginx 設定 | HTTPS + LemonLDAP::NG によるログイン画面 + Forward Auth 付きで生成 |
+| nginx 設定 | `/etc/nginx/conf.d/devbox-front.conf` を HTTPS + LemonLDAP::NG Forward Auth 付きで生成 |
 
 LLDAP 認証情報は `/etc/devbox/lldap.env`（権限 600）に保存されます。
 TLS の秘密鍵は `/etc/devbox/tls/devbox.key`（権限 600）に保存されます。
 
 `DEVBOX_DOMAIN` に IP アドレスを指定した場合、LemonLDAP::NG の Cookie
-ドメイン制約（数字だけのラベルは不可）のため、install.sh が自動的に
+ドメイン制約（数字だけのラベルは不可）のため、install-front.sh が自動的に
 `192-168-11-64.sslip.io` のような [sslip.io](https://sslip.io/) 経由の
 ホスト名に変換します（インターネット経由の DNS 解決が必要です。閉域網の
 場合は別途ホスト名を用意してください）。
@@ -104,32 +193,159 @@ TLS の秘密鍵は `/etc/devbox/tls/devbox.key`（権限 600）に保存され�
 #### LLDAP / LemonLDAP::NG をスキップしたい場合
 
 ```bash
-SKIP_LLDAP=yes DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/install.sh
+SKIP_LLDAP=yes DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/front/install-front.sh
 ```
 
-### 2. ユーザー追加
+### 2. backend サーバーのインストール（backendごとに実行）
 
 ```bash
-sudo bash scripts/adduser.sh yamada
-sudo bash scripts/adduser.sh tanaka --cpu 400% --mem 8G
+# front サーバーの IP または CIDR を指定
+# （backend の内部ポート80はこの送信元からのみ firewalld で許可される）
+export FRONT_ALLOWED_SOURCE="10.0.1.5"
+
+# front で install-front.sh 実行後に表示された値をそのまま指定
+export DEVBOX_INTERNAL_TOKEN="<front の完了メッセージに表示された値>"
+
+sudo -E bash scripts/backend/install-backend.sh
 ```
 
-adduser.sh が行うこと:
+backend は何台でも追加できます。追加のたびに、そのホストで
+`install-backend.sh` を実行するだけです（front 側の再インストールは
+不要）。`DEVBOX_INTERNAL_TOKEN` は front と backend 全台で共通の値を
+使ってください（front の `/etc/devbox/platform.conf` に保存されています）。
+
+install-backend.sh が行うこと:
+
+| ステップ | 内容 |
+|---------|------|
+| EPEL + 基本パッケージ | epel-release, curl, git, python3, rsync, tar |
+| VS Code | Microsoft rpm リポジトリから `code`（serve-web）をインストール |
+| Java | Adoptium rpm リポジトリから `temurin-8-jdk` / `temurin-25-jdk`（Java 8・25）を並行インストール |
+| **Apache Tomcat** | archive.apache.org の公式 tarball から 9 系・11 系を並行インストール（詳細は[後述](#apache-tomcat)） |
+| **Claude Code CLI** | Anthropic rpm リポジトリから `claude-code` をインストール（詳細は[後述](#claude-code-cli)） |
+| **VS Code 拡張機能** | `scripts/backend/vscode-extensions.list` に基づきマスターセットを構築し、既存の全ユーザーへ配布（詳細は[後述](#vs-code-拡張機能)） |
+| Xpra + xpra-html5 | EPEL + ソースビルド |
+| XFCE | デスクトップ環境 |
+| nginx | ローカル用途のみ（TLSなし、80番で待受） |
+| SELinux | `httpd_can_network_connect` を有効化 |
+| **firewalld** | 80番を `FRONT_ALLOWED_SOURCE` からのみ許可（未指定時は一切開放しない。firewalld 自体が無効な場合は強く警告） |
+| systemd ユニット | `devbox@.target` / `vscode@.service` / `xpra@.service` を `/etc/systemd/system/` へインストール |
+| nginx 設定 | `/etc/nginx/conf.d/devbox-backend.conf` を平文HTTP・`DEVBOX_INTERNAL_TOKEN` 必須で生成（詳細は[backend の 80 番に直接アクセスされた場合の保護](#backend-の-80-番に直接アクセスされた場合の保護)） |
+
+`FRONT_ALLOWED_SOURCE` を指定しないと 80 番ポートは firewalld で
+一切開放されません（安全側デフォルト）。後から開放したい場合は
+インストール完了メッセージに表示される `firewall-cmd` コマンドを実行して
+ください。`DEVBOX_INTERNAL_TOKEN` を指定しない場合、install-backend.sh は
+エラーで停止します（無防備な backend が意図せずできることを防ぐため）。
+
+### 3. ユーザー追加（backend → front の2段階）
+
+```bash
+# ① backend サーバーで実行: ユーザーの実体（Linuxアカウント・systemdサービス）を作成
+sudo bash scripts/backend/adduser-backend.sh yamada
+sudo bash scripts/backend/adduser-backend.sh tanaka --cpu 400% --mem 8G
+
+# ② front サーバーで実行: 認証・ルーティングを登録
+sudo bash scripts/front/register-user.sh yamada --backend 10.0.2.11
+sudo bash scripts/front/register-user.sh tanaka --backend 10.0.2.12
+```
+
+`--backend` にはユーザーを配置した backend サーバーの IP（または
+`host:port`。port省略時は80）を指定します。**どの backend に
+配置するかは管理者が明示的に選びます**（自動割り当てはしません）。
+
+adduser-backend.sh が行うこと（backend 上）:
 
 | 処理 | 内容 |
 |------|------|
 | Linux ユーザー作成 | `useradd` でホームディレクトリ付き作成 |
-| ポート割り当て | UID オフセットで自動計算・競合チェック |
+| ポート割り当て | UID オフセットで自動計算・競合チェック（backend内でローカルに完結） |
 | **VS Code 拡張機能配布** | マスターセットの独立コピーを `~/.vscode/server-data/extensions` へ配布（詳細は[後述](#vs-code-拡張機能)） |
 | **Claude Code CLI 連携** | VS Code の Claude 拡張機能がシステムの `claude` を起動するよう設定し、`~/.claude/settings.json` を用意（詳細は[後述](#claude-code-cli)） |
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
-| nginx | `/etc/nginx/conf.d/devbox-users/[username].conf` を生成・リロード |
+| nginx | `/etc/nginx/conf.d/devbox-backend-users/[username].conf` を生成・リロード（認証なし、ローカルプロキシのみ） |
+
+register-user.sh が行うこと（front 上）:
+
+| 処理 | 内容 |
+|------|------|
+| 疎通確認 | 指定した backend の `/{username}/vscode/` へ疎通確認（失敗しても続行） |
+| 登録情報保存 | `/etc/devbox/registrations/[username].conf`（どの backend に配置したかを記録） |
+| nginx | `/etc/nginx/conf.d/devbox-front-users/[username].conf` を生成・リロード（認証付き、backend へプロキシ） |
 | LLDAP | `LLDAP_ADMIN_PASSWORD` がある場合のみ GraphQL API + `lldap_set_password` でユーザー登録 |
+| LemonLDAP::NG | 本人のみ `/{username}/` にアクセスできる認可ルールを追加 |
+
+`--backend` を変えて `register-user.sh` を再実行すると、そのユーザーの
+ルーティング先を別の backend へ移行できます（先にそのユーザーを新しい
+backend で `adduser-backend.sh` しておくこと）。
 
 ユーザー名には `_auth` / `static` / `api` / `auth` / `lldap` / `lmauth` は
-使用できません（nginx のトップレベルパスとして予約済みのため）。
+使用できません（front の nginx でトップレベルパスとして予約済みのため）。
 
-## systemd 構成
+### 4. ユーザー削除（front → backend の2段階、追加とは逆順）
+
+```bash
+# ① front サーバーで実行: 登録を解除し、ただちにログイン・アクセスを遮断
+sudo bash scripts/front/deregister-user.sh yamada
+
+# ② backend サーバーで実行: 実体（Linuxアカウント・systemdサービス）を削除
+sudo bash scripts/backend/deluser-backend.sh yamada
+
+# ホームディレクトリ（コード・データ）も完全に削除したい場合
+sudo bash scripts/backend/deluser-backend.sh yamada --purge
+```
+
+追加とは逆に、**先に front で `deregister-user.sh`** を実行してください
+（LLDAP アカウントを削除し即座にログイン不能にしてから、backend 側の実体を
+片付ける順序）。
+
+deregister-user.sh が行うこと（front 上）:
+
+| 処理 | 内容 |
+|------|------|
+| nginx | `/etc/nginx/conf.d/devbox-front-users/[username].conf` を削除・リロード |
+| 登録情報削除 | `/etc/devbox/registrations/[username].conf` を削除 |
+| LLDAP | GraphQL API でユーザーを削除（以後ログイン不可） |
+
+deluser-backend.sh が行うこと（backend 上）:
+
+| 処理 | 内容 |
+|------|------|
+| systemd | `vscode@` / `xpra@` / `devbox@` を停止・無効化し、CPU/MEMドロップインを削除 |
+| nginx | `/etc/nginx/conf.d/devbox-backend-users/[username].conf` を削除・リロード |
+| Linux ユーザー削除 | `userdel`（`--purge` 指定時のみ `-r` でホームディレクトリも削除） |
+
+デフォルトではホームディレクトリ（コード等のデータ）を残します。誤削除
+からの復旧や監査のためで、完全に削除したい場合のみ `--purge` を指定して
+ください。
+
+LemonLDAP::NG の認可ルール（`^/{username}/(.*) => $uid eq "{username}"`）は
+自動削除しません。LLDAP アカウントが無くなるため事実上無効化されますが、
+きれいに消したい場合は `lemonldap-ng-cli` で個別に削除してください。
+
+### 1台構成にする場合
+
+front と backend を同一ホストで動かすこともできます。front は443のみ、
+backend は80のみとリッスンポートが分かれており、nginx 設定ファイル名も
+別（`devbox-front*.conf` / `devbox-backend*.conf`）なため、同居させても
+衝突しません。ただし front が80番を使わない設計上、同居構成では
+HTTP→HTTPS の自動リダイレクトが効きません（`https://` を明示してください）。
+
+```bash
+# 1. front を先にインストール（DEVBOX_INTERNAL_TOKEN がここで生成される）
+DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/front/install-front.sh
+# 完了メッセージに表示された DEVBOX_INTERNAL_TOKEN を控えておく
+
+# 2. backend をインストール（自分自身を front とみなし 127.0.0.1 を指定）
+FRONT_ALLOWED_SOURCE=127.0.0.1 DEVBOX_INTERNAL_TOKEN="<上記の値>" \
+  sudo -E bash scripts/backend/install-backend.sh
+
+# 3. ユーザー追加も同一ホストで両方実行
+sudo bash scripts/backend/adduser-backend.sh yamada
+sudo bash scripts/front/register-user.sh yamada --backend 127.0.0.1
+```
+
+## systemd 構成（backend）
 
 ```
 devbox@{username}.target
@@ -146,6 +362,7 @@ devbox@{username}.target
 ## サービス操作
 
 ```bash
+# --- backend 上 ---
 # 起動 / 停止 / 再起動
 systemctl start   devbox@yamada.target
 systemctl stop    devbox@yamada.target
@@ -159,19 +376,30 @@ ss -tlnp | grep -E '10000|14500'
 journalctl -u vscode@yamada.service -f
 journalctl -u xpra@yamada.service   -f
 
+# --- front 上 ---
 # LLDAP / LemonLDAP::NG サービス確認
 systemctl status lldap llng-fastcgi-server
 ```
 
 ## アップデート
 
+いずれも **backend ごとに個別に実行**します（`/etc/devbox/users/*.conf`
+や拡張機能マスターセット、Tomcat は backend ごとにローカルなため）。
+
 | スクリプト | 内容 |
 |---|---|
-| `sudo bash scripts/update-extensions.sh [--no-restart]` | VS Code 拡張機能マスターセットを更新し、既存の全ユーザーへ配布（詳細は[VS Code 拡張機能](#vs-code-拡張機能)） |
-| `sudo bash scripts/update-tomcat.sh [9\|11]` | Tomcat を archive.apache.org の最新パッチへ更新（詳細は[Apache Tomcat](#apache-tomcat)） |
-| `sudo bash scripts/update-all.sh [--no-restart]` | `dnf update -y`（VS Code / Java / Claude Code CLI 等の dnf 管理パッケージも含む）+ 上記2つを一括実行 |
+| `sudo bash scripts/backend/update-extensions.sh [--no-restart]` | VS Code 拡張機能マスターセットを更新し、そのbackend上の全ユーザーへ配布（詳細は[VS Code 拡張機能](#vs-code-拡張機能)） |
+| `sudo bash scripts/backend/update-tomcat.sh [9\|11]` | Tomcat を archive.apache.org の最新パッチへ更新（詳細は[Apache Tomcat](#apache-tomcat)） |
+| `sudo bash scripts/backend/update-all.sh [--no-restart]` | `dnf update -y`（VS Code / Java / Claude Code CLI 等の dnf 管理パッケージも含む）+ 上記2つを一括実行 |
 
-## ポート割り当て
+front 側（nginx / LLDAP / LemonLDAP::NG）は通常の `dnf update -y` で
+更新してください。
+
+## ポート割り当て（backend内でローカルに独立）
+
+各 backend は UID オフセットで独立にポートを割り当てるため、backend間の
+調整は不要です（backendが違えばホストも別なので同じポート番号でも衝突
+しません）。
 
 | UID  | VS Code ポート | Xpra ポート | Xpra ディスプレイ |
 |------|---------------|------------|------------------|
@@ -179,42 +407,46 @@ systemctl status lldap llng-fastcgi-server
 | 1001 | 10001         | 14501      | :101             |
 | 1002 | 10002         | 14502      | :102             |
 
+front↔backend間の内部通信ポートは固定で **80** です
+（`DEVBOX_BACKEND_PORT`）。
+
 ## VS Code 拡張機能
 
-拡張機能は **root がマスターセットを一元管理し、各ユーザーには読み取り専用の
-独立したコピーを配布する** 方式です。
+以下はすべて **backend 側** の話です。拡張機能は **root がマスターセット
+を一元管理し、各ユーザーには読み取り専用の独立したコピーを配布する** 方式
+です。
 
 ```
-scripts/vscode-extensions.list        インストールする拡張機能 ID の一覧（編集して追加/削除）
-        ↓ install.sh / update-extensions.sh が code --install-extension で構築
+scripts/backend/vscode-extensions.list        インストールする拡張機能 ID の一覧（編集して追加/削除）
+        ↓ install-backend.sh / update-extensions.sh が code --install-extension で構築
 /opt/devbox/vscode-extensions/        マスターセット（root 所有）
-        ↓ adduser.sh（新規ユーザー時）/ update-extensions.sh（既存ユーザー更新時）が rsync で複製
+        ↓ adduser-backend.sh（新規ユーザー時）/ update-extensions.sh（既存ユーザー更新時）が rsync で複製
 /home/{username}/.vscode/server-data/extensions/   ユーザーごとの独立コピー（所有者 root、本人は読み取り専用）
 ```
 
 | 要件 | 実現方法 |
 |---|---|
 | ユーザー間で干渉しない | 各ユーザーは共有ディレクトリではなく独立したコピーを持つ（`rsync -a --delete` で複製）。あるユーザーの VS Code プロセスが `extensions.json` 等へ書き込んでも他ユーザーには影響しない |
-| root によるアップデートが全ユーザーに反映される | `sudo bash scripts/update-extensions.sh` を実行すると、マスターセットを最新化した上で登録済みの全ユーザーへ再配布し、起動中の `vscode@{username}.service` を再起動して反映する |
+| root によるアップデートが同一backend内の全ユーザーに反映される | そのbackendで `sudo bash scripts/backend/update-extensions.sh` を実行すると、マスターセットを最新化した上で登録済みの全ユーザーへ再配布し、起動中の `vscode@{username}.service` を再起動して反映する |
 | ユーザー本人による追加インストールを禁止 | 配布後の拡張機能ディレクトリは `chown root:{username}` + `chmod 750`（本人は読み取り・実行のみ）にする。拡張機能に同梱されたネイティブバイナリの実行ビットは維持されるため動作に影響しない。VS Code の拡張機能ビューから「インストール」を実行してもファイル書き込みに失敗し、追加できない |
 
-拡張機能を追加・削除・更新したい場合:
+拡張機能を追加・削除・更新したい場合（対象の backend で実行）:
 
 ```bash
-# scripts/vscode-extensions.list を編集後
-sudo bash scripts/update-extensions.sh
+# scripts/backend/vscode-extensions.list を編集後
+sudo bash scripts/backend/update-extensions.sh
 
 # 起動中のセッションを止めずに配布だけ行いたい場合（反映は次回接続/再起動時）
-sudo bash scripts/update-extensions.sh --no-restart
+sudo bash scripts/backend/update-extensions.sh --no-restart
 ```
 
 ## Apache Tomcat
 
-Apache Tomcat は公式の dnf/yum リポジトリを提供していません。RHEL 9 系の
-EPEL にある `tomcat` パッケージも 9.0 系が1つあるだけで、複数のメジャー
-バージョンを dnf で並存させることはできません。そのため
-**archive.apache.org の公式 tarball** を取得し、バージョンごとに
-展開して共存させています。
+以下はすべて **backend 側** の話です。Apache Tomcat は公式の dnf/yum
+リポジトリを提供していません。RHEL 9 系の EPEL にある `tomcat` パッケージ
+も 9.0 系が1つあるだけで、複数のメジャーバージョンを dnf で並存させる
+ことはできません。そのため **archive.apache.org の公式 tarball** を
+取得し、バージョンごとに展開して共存させています。
 
 ```
 https://archive.apache.org/dist/tomcat/tomcat-{9,11}/   最新パッチバージョンを自動検出
@@ -241,34 +473,34 @@ cp "$CATALINA_HOME"/conf/* "$CATALINA_BASE"/conf/
 "$CATALINA_HOME"/bin/startup.sh
 ```
 
-更新:
+更新（対象の backend で実行）:
 
 ```bash
-sudo bash scripts/update-tomcat.sh        # 9・11 の両方を最新パッチへ
-sudo bash scripts/update-tomcat.sh 9      # 9 系のみ
+sudo bash scripts/backend/update-tomcat.sh        # 9・11 の両方を最新パッチへ
+sudo bash scripts/backend/update-tomcat.sh 9      # 9 系のみ
 ```
 
 ## Claude Code CLI
 
-`claude` 本体は **システムに1つだけ**（`/usr/bin/claude`）インストールし、
-VS Code の Claude 拡張機能（`anthropic.claude-code`）はユーザーごとの設定で
-その共有バイナリを起動するようにします。CLI 自体の設定・会話履歴・認証情報は
-実行ユーザーの `$HOME/.claude/` に保存される仕組みのため、バイナリを共有して
-いてもユーザー間のデータは混ざりません。
+以下はすべて **backend 側** の話です。`claude` 本体は **backendごとに
+1つだけ**（`/usr/bin/claude`）インストールし、VS Code の Claude 拡張機能
+（`anthropic.claude-code`）はユーザーごとの設定でその共有バイナリを起動
+するようにします。CLI 自体の設定・会話履歴・認証情報は実行ユーザーの
+`$HOME/.claude/` に保存される仕組みのため、バイナリを共有していても
+ユーザー間のデータは混ざりません。
 
-install.sh が行うこと:
+install-backend.sh が行うこと:
 
 | ステップ | 内容 |
 |---|---|
 | リポジトリ登録 | `/etc/yum.repos.d/claude-code.repo`（`downloads.claude.ai` の公式 rpm リポジトリ） |
 | インストール | `dnf install -y claude-code` |
-| パス記録 | 検出した `claude` の絶対パスを `/etc/devbox/platform.conf` の `CLAUDE_BIN` に保存（adduser.sh が参照） |
 
-adduser.sh が行うこと（ユーザーごと）:
+adduser-backend.sh が行うこと（ユーザーごと）:
 
 | 処理 | 内容 |
 |---|---|
-| VS Code 拡張機能の連携 | `~/.vscode/server-data/data/User/settings.json` に `"claudeCode.claudeProcessWrapper": "<CLAUDE_BIN>"` を設定（既存の設定は保持したままマージ）。以後、拡張機能から起動される Claude はシステムの `claude` を使う |
+| VS Code 拡張機能の連携 | `~/.vscode/server-data/data/User/settings.json` に `"claudeCode.claudeProcessWrapper": "<claudeの絶対パス>"` を設定（既存の設定は保持したままマージ）。以後、拡張機能から起動される Claude はシステムの `claude` を使う |
 | CLI 設定ファイルの用意 | `~/.claude/settings.json` が無ければ `{}` で作成（既存ファイルは上書きしない） |
 
 いずれもユーザー本人が所有する通常のファイルとして作成されるため、VS Code
@@ -278,8 +510,9 @@ adduser.sh が行うこと（ユーザーごと）:
 
 ## LemonLDAP::NG / LLDAP 構成
 
-install.sh が自動でセットアップします。LLDAP は RPM パッケージ、
-LemonLDAP::NG は EPEL 公式パッケージなので、どちらもビルドは発生しません。
+以下はすべて **front 側** の話です。install-front.sh が自動でセットアップ
+します。LLDAP は RPM パッケージ、LemonLDAP::NG は EPEL 公式パッケージなので、
+どちらもビルドは発生しません。
 
 | コンポーネント | 場所 |
 |---|---|
@@ -289,7 +522,7 @@ LemonLDAP::NG は EPEL 公式パッケージなので、どちらもビルドは
 | LemonLDAP::NG 設定 | `lemonldap-ng-cli`（`/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli`）で投入。手組み JSON は `restore` ではなく `merge` を使うこと（`restore` は `cfgDate` が欠落し設定全体が読めなくなる） |
 | 認証情報 | `/etc/devbox/lldap.env`（権限 600） |
 
-アクセス経路（すべて単一ドメイン上のパスで区別、サブドメイン不要）:
+アクセス経路（すべて front の単一ドメイン上のパスで区別、サブドメイン不要）:
 
 | パス | 内容 |
 |---|---|
@@ -297,26 +530,29 @@ LemonLDAP::NG は EPEL 公式パッケージなので、どちらもビルドは
 | `/_auth/static/` | ポータルの静的アセット（`staticPrefix` を変更し LLDAP の `/static/` と衝突しないようにしている） |
 | `/lldap/` | LLDAP 管理画面（Web UI）。ポート 17170 は firewalld で開放せず、nginx 経由でのみアクセス可能 |
 | `/static/` `/pkg/` `/api/` `/auth/` | LLDAP 管理画面が使う絶対パス（アプリ内部で固定参照されるため、この 4 つはトップレベルで LLDAP 専用に予約） |
-| `/{username}/...` | 各ユーザーの devbox。`auth_request /lmauth;` で LemonLDAP::NG のセッションを確認 |
+| `/{username}/...` | 各ユーザーの devbox。front が `auth_request /lmauth;` で LemonLDAP::NG のセッションを確認したのち、該当 backend へプロキシ |
 
-nginx は各ユーザーの location で `auth_request /lmauth;` を発行し、
+front の nginx は各ユーザーの location で `auth_request /lmauth;` を発行し、
 LemonLDAP::NG の FastCGI ハンドラ（`llng-fastcgi-server`、Unix ソケット
 `/run/llng-fastcgi-server/llng-fastcgi.sock`）にセッション Cookie の有無・
 妥当性を問い合わせます。未認証の場合は `/_auth/` のログイン画面へ 302
 リダイレクトされ、ログイン後はセッション Cookie で以後のアクセスが認可
 されます。LLDAP・LemonLDAP::NG の管理系ポート（17170、Unix ソケット）は
 いずれも外部に公開せず、nginx のパスルーティング経由でのみ到達可能です。
+認証は front だけで完結し、backend はそれ自体を検証しません（backend の
+内部ポートを front 以外へ公開しないことがセキュリティ上必須です）。
 
 **アクセス制御（認可）**: 「ログイン済みかどうか」だけでなく「本人の
 devbox かどうか」も LemonLDAP::NG の `locationRules` で制御しています。
-adduser.sh がユーザー作成時に `^/{username}/(.*)  =>  $uid eq "{username}"`
-という認可ルールを追加するため、ログイン済みの別ユーザーが他人の
-`/{username}/` にアクセスすると 403 になります。既存ユーザー分の
+register-user.sh がユーザー登録時に `^/{username}/(.*)  =>  $uid eq
+"{username}"` という認可ルールを追加するため、ログイン済みの別ユーザーが
+他人の `/{username}/` にアクセスすると 403 になります。既存ユーザー分の
 ルールが入っていない環境（このアクセス制御を導入する前に作成した
-ユーザー）では、該当ユーザーに対して adduser.sh を再実行するか、
+ユーザー）では、該当ユーザーに対して register-user.sh を再実行するか、
 `lemonldap-ng-cli merge` で個別にルールを追加してください。
 
-**ログイン画面（ポータル）の設定**: 以下を install.sh が自動設定しています。
+**ログイン画面（ポータル）の設定**: 以下を install-front.sh が自動設定
+しています。
 
 | 項目 | 設定 |
 |---|---|

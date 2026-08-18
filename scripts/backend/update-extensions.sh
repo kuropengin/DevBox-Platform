@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DevBox Platform - VS Code 拡張機能の更新スクリプト
-# 使い方: sudo bash scripts/update-extensions.sh [--no-restart]
+# 使い方: sudo bash scripts/backend/update-extensions.sh [--no-restart]
 #
 # root がマスターセット（scripts/vscode-extensions.list）の拡張機能を
 # 最新化し、既存の全ユーザーへ配布する。ユーザー自身は拡張機能ディレクトリ
@@ -15,16 +15,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=../lib-common.sh
+source "${SCRIPT_DIR}/../lib-common.sh"
 # shellcheck source=lib-vscode-extensions.sh
 source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
-ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-
-[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash scripts/update-extensions.sh"
+[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash scripts/backend/update-extensions.sh"
 
 RESTART=yes
 for arg in "$@"; do

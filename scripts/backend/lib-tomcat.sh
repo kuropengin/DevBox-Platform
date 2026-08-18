@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DevBox Platform - Apache Tomcat（tarball）の共通処理
-# install.sh / update-tomcat.sh / update-all.sh から source して使う。
+# install-backend.sh / update-tomcat.sh / update-all.sh から source して使う。
 #
 # Apache Tomcat は公式の dnf/yum リポジトリを提供しておらず、RHEL 9 系の
 # EPEL にも "tomcat"（9.0系）が1つあるだけでメジャーバージョンを並存

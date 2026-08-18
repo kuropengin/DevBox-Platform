@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DevBox Platform - 一括アップデートスクリプト
-# 使い方: sudo bash scripts/update-all.sh [--no-restart]
+# 使い方: sudo bash scripts/backend/update-all.sh [--no-restart]
 #
 # 以下をまとめて実行する:
 #   1. dnf update -y            OS パッケージ全体（VS Code / Java / Claude Code CLI 等の
@@ -15,18 +15,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=../lib-common.sh
+source "${SCRIPT_DIR}/../lib-common.sh"
 # shellcheck source=lib-vscode-extensions.sh
 source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
 # shellcheck source=lib-tomcat.sh
 source "${SCRIPT_DIR}/lib-tomcat.sh"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
-ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-
-[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash scripts/update-all.sh"
+[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash scripts/backend/update-all.sh"
 
 RESTART=yes
 for arg in "$@"; do

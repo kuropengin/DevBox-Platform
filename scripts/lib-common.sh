@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# DevBox Platform - 全スクリプト共通のログ関数・ユーザー名検証
+# front/backend いずれのスクリプトからも source して使う。
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
+ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+# nginx のトップレベルパスとして front 側で予約済み
+# （LemonLDAP::NG ポータル / LLDAP 管理画面）。backend 単体では衝突しないが、
+# front/backend どちらで実行しても同じ制約になるよう共通化しておく。
+DEVBOX_RESERVED_USERNAMES=(_auth static pkg api auth lldap lmauth)
+
+# ユーザー名の形式・予約語をチェックする。不正なら die する。
+# 引数: $1 = ユーザー名
+devbox_validate_username() {
+  local username="$1"
+  [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "無効なユーザー名: $username"
+
+  local reserved
+  for reserved in "${DEVBOX_RESERVED_USERNAMES[@]}"; do
+    [[ "$username" == "$reserved" ]] && die "'${username}' は予約語のため使用できません"
+  done
+}
