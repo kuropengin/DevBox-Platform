@@ -41,8 +41,11 @@ devbox-platform/
     ├── install.sh                    # 初回セットアップ（LLDAP / LemonLDAP::NG を含む）
     ├── adduser.sh                    # ユーザー追加
     ├── update-extensions.sh          # VS Code 拡張機能マスターセットの更新・全ユーザー配布
-    ├── lib-vscode-extensions.sh      # 拡張機能マスター管理・配布の共通処理（上記2つが source）
+    ├── update-tomcat.sh              # Tomcat 9 / 11 の更新
+    ├── update-all.sh                 # dnf update + 拡張機能更新 + Tomcat 更新を一括実行
+    ├── lib-vscode-extensions.sh      # 拡張機能マスター管理・配布の共通処理
     ├── vscode-extensions.list        # インストールする拡張機能 ID の一覧
+    ├── lib-tomcat.sh                 # Tomcat tarball 導入・更新の共通処理
     └── lib-claude.sh                 # Claude Code CLI 連携の共通処理（adduser.sh が source）
 ```
 
@@ -71,9 +74,10 @@ install.sh が行うこと:
 
 | ステップ | 内容 |
 |---------|------|
-| EPEL + 基本パッケージ | epel-release, curl, wget, git, python3, openssl, rsync |
+| EPEL + 基本パッケージ | epel-release, curl, wget, git, python3, openssl, rsync, tar |
 | VS Code | Microsoft rpm リポジトリから `code` をインストール |
-| Java | Adoptium rpm リポジトリから `temurin-25-jdk`（Java 25）をインストール |
+| Java | Adoptium rpm リポジトリから `temurin-8-jdk` / `temurin-25-jdk`（Java 8・25）を並行インストール |
+| **Apache Tomcat** | archive.apache.org の公式 tarball から 9 系・11 系を並行インストール（詳細は[後述](#apache-tomcat)） |
 | **Claude Code CLI** | Anthropic rpm リポジトリから `claude-code` をインストール（詳細は[後述](#claude-code-cli)） |
 | **VS Code 拡張機能** | `scripts/vscode-extensions.list` に基づきマスターセットを構築し、既存の全ユーザーへ配布（詳細は[後述](#vs-code-拡張機能)） |
 | Xpra + xpra-html5 | EPEL + ソースビルド |
@@ -159,6 +163,14 @@ journalctl -u xpra@yamada.service   -f
 systemctl status lldap llng-fastcgi-server
 ```
 
+## アップデート
+
+| スクリプト | 内容 |
+|---|---|
+| `sudo bash scripts/update-extensions.sh [--no-restart]` | VS Code 拡張機能マスターセットを更新し、既存の全ユーザーへ配布（詳細は[VS Code 拡張機能](#vs-code-拡張機能)） |
+| `sudo bash scripts/update-tomcat.sh [9\|11]` | Tomcat を archive.apache.org の最新パッチへ更新（詳細は[Apache Tomcat](#apache-tomcat)） |
+| `sudo bash scripts/update-all.sh [--no-restart]` | `dnf update -y`（VS Code / Java / Claude Code CLI 等の dnf 管理パッケージも含む）+ 上記2つを一括実行 |
+
 ## ポート割り当て
 
 | UID  | VS Code ポート | Xpra ポート | Xpra ディスプレイ |
@@ -194,6 +206,46 @@ sudo bash scripts/update-extensions.sh
 
 # 起動中のセッションを止めずに配布だけ行いたい場合（反映は次回接続/再起動時）
 sudo bash scripts/update-extensions.sh --no-restart
+```
+
+## Apache Tomcat
+
+Apache Tomcat は公式の dnf/yum リポジトリを提供していません。RHEL 9 系の
+EPEL にある `tomcat` パッケージも 9.0 系が1つあるだけで、複数のメジャー
+バージョンを dnf で並存させることはできません。そのため
+**archive.apache.org の公式 tarball** を取得し、バージョンごとに
+展開して共存させています。
+
+```
+https://archive.apache.org/dist/tomcat/tomcat-{9,11}/   最新パッチバージョンを自動検出
+        ↓ tar.gz + .sha512 チェックサム検証の上でダウンロード・展開
+/opt/devbox/tomcat/releases/{9,11}/apache-tomcat-<version>/   実体（root 所有、全ユーザー読み取り・実行可、書き込みは root のみ）
+        ↓ シンボリックリンク
+/opt/devbox/tomcat/tomcat{9,11}                                CATALINA_HOME として使う安定パス
+```
+
+公式 tarball は `conf/` が 700、起動スクリプトが 750 など「配布時のまま
+では root 以外アクセス不可」な権限になっているため、展開後に
+`chmod -R a+rX,go-w` で全ユーザーが読み取り・実行できるように調整して
+います（書き込みは引き続き root のみ）。
+
+各ユーザーが自分用のインスタンスを動かす場合は、`CATALINA_HOME` は
+共有ディレクトリを指したまま、`CATALINA_BASE` だけ自分のホーム配下に
+用意してください（Tomcat 標準の複数インスタンス構成）。
+
+```bash
+export CATALINA_HOME=/opt/devbox/tomcat/tomcat9
+export CATALINA_BASE=~/tomcat9-instance
+mkdir -p "$CATALINA_BASE"/{conf,logs,temp,webapps,work}
+cp "$CATALINA_HOME"/conf/* "$CATALINA_BASE"/conf/
+"$CATALINA_HOME"/bin/startup.sh
+```
+
+更新:
+
+```bash
+sudo bash scripts/update-tomcat.sh        # 9・11 の両方を最新パッチへ
+sudo bash scripts/update-tomcat.sh 9      # 9 系のみ
 ```
 
 ## Claude Code CLI

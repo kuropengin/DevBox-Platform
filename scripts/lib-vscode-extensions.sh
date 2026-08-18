@@ -70,3 +70,30 @@ vscode_ext_sync_to_all_users() {
   done
   shopt -u nullglob
 }
+
+# マスターセットを最新化し、既存の全ユーザーへ配布する。必要なら起動中の
+# vscode@<user>.service を再起動して反映する（update-extensions.sh /
+# update-all.sh から呼ばれる）。
+# 引数: $1 = yes|no（再起動するか。省略時 yes）
+vscode_ext_update_all() {
+  local restart="${1:-yes}"
+  local conf username had_users=0
+
+  vscode_ext_build_master
+
+  shopt -s nullglob
+  for conf in /etc/devbox/users/*.conf; do
+    had_users=1
+    username="$(basename "$conf" .conf)"
+    vscode_ext_sync_to_user "$username"
+    echo "  配布完了: ${username}"
+
+    if [[ "$restart" == "yes" ]] && systemctl is-active --quiet "vscode@${username}.service" 2>/dev/null; then
+      systemctl restart "vscode@${username}.service"
+      echo "  vscode@${username}.service を再起動しました（更新反映のため）"
+    fi
+  done
+  shopt -u nullglob
+
+  [[ "$had_users" -eq 0 ]] && echo "  登録済みユーザーがいません（配布対象なし）"
+}

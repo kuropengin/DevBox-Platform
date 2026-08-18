@@ -35,28 +35,8 @@ for arg in "$@"; do
 done
 
 info "マスターセットの拡張機能を更新中... (${VSCODE_EXT_LIST_FILE})"
-vscode_ext_build_master
-ok "マスターセット更新完了 → ${VSCODE_EXT_MASTER_DIR}"
-
 info "既存ユーザーへ配布中..."
-shopt -s nullglob
-users=(/etc/devbox/users/*.conf)
-shopt -u nullglob
-
-if [[ ${#users[@]} -eq 0 ]]; then
-  warn "登録済みユーザーがいません（配布対象なし）"
-else
-  for conf in "${users[@]}"; do
-    username="$(basename "$conf" .conf)"
-    vscode_ext_sync_to_user "$username"
-    ok "配布完了: ${username}"
-
-    if [[ "$RESTART" == "yes" ]] && systemctl is-active --quiet "vscode@${username}.service" 2>/dev/null; then
-      systemctl restart "vscode@${username}.service"
-      ok "vscode@${username}.service を再起動しました（更新反映のため）"
-    fi
-  done
-fi
+vscode_ext_update_all "$RESTART"
 
 echo ""
 ok "拡張機能の更新が完了しました"
