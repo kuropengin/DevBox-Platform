@@ -32,14 +32,18 @@ Markdown プレビュー等）はブラウザの Web Crypto API を使うため 
 ```
 devbox-platform/
 ├── portal/
-│   └── index.html              # ユーザーポータル（静的 HTML）
+│   └── index.html                    # ユーザーポータル（静的 HTML）
 ├── systemd/
-│   ├── devbox@.target          # DevBox 管理ターゲット（テンプレート）
-│   ├── vscode@.service         # VS Code serve-web
-│   └── xpra@.service           # Xpra HTML5 デスクトップ
+│   ├── devbox@.target                # DevBox 管理ターゲット（テンプレート）
+│   ├── vscode@.service               # VS Code serve-web
+│   └── xpra@.service                 # Xpra HTML5 デスクトップ
 └── scripts/
-    ├── install.sh              # 初回セットアップ（LLDAP / LemonLDAP::NG を含む）
-    └── adduser.sh              # ユーザー追加
+    ├── install.sh                    # 初回セットアップ（LLDAP / LemonLDAP::NG を含む）
+    ├── adduser.sh                    # ユーザー追加
+    ├── update-extensions.sh          # VS Code 拡張機能マスターセットの更新・全ユーザー配布
+    ├── lib-vscode-extensions.sh      # 拡張機能マスター管理・配布の共通処理（上記2つが source）
+    ├── vscode-extensions.list        # インストールする拡張機能 ID の一覧
+    └── lib-claude.sh                 # Claude Code CLI 連携の共通処理（adduser.sh が source）
 ```
 
 ## 動作環境
@@ -67,8 +71,11 @@ install.sh が行うこと:
 
 | ステップ | 内容 |
 |---------|------|
-| EPEL + 基本パッケージ | epel-release, curl, wget, git, python3, openssl |
+| EPEL + 基本パッケージ | epel-release, curl, wget, git, python3, openssl, rsync |
 | VS Code | Microsoft rpm リポジトリから `code` をインストール |
+| Java | Adoptium rpm リポジトリから `temurin-25-jdk`（Java 25）をインストール |
+| **Claude Code CLI** | Anthropic rpm リポジトリから `claude-code` をインストール（詳細は[後述](#claude-code-cli)） |
+| **VS Code 拡張機能** | `scripts/vscode-extensions.list` に基づきマスターセットを構築し、既存の全ユーザーへ配布（詳細は[後述](#vs-code-拡張機能)） |
 | Xpra + xpra-html5 | EPEL + ソースビルド |
 | XFCE | デスクトップ環境 |
 | nginx | リバースプロキシ |
@@ -109,6 +116,8 @@ adduser.sh が行うこと:
 |------|------|
 | Linux ユーザー作成 | `useradd` でホームディレクトリ付き作成 |
 | ポート割り当て | UID オフセットで自動計算・競合チェック |
+| **VS Code 拡張機能配布** | マスターセットの独立コピーを `~/.vscode/server-data/extensions` へ配布（詳細は[後述](#vs-code-拡張機能)） |
+| **Claude Code CLI 連携** | VS Code の Claude 拡張機能がシステムの `claude` を起動するよう設定し、`~/.claude/settings.json` を用意（詳細は[後述](#claude-code-cli)） |
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
 | nginx | `/etc/nginx/conf.d/devbox-users/[username].conf` を生成・リロード |
 | LLDAP | `LLDAP_ADMIN_PASSWORD` がある場合のみ GraphQL API + `lldap_set_password` でユーザー登録 |
@@ -157,6 +166,63 @@ systemctl status lldap llng-fastcgi-server
 | 1000 | 10000         | 14500      | :100             |
 | 1001 | 10001         | 14501      | :101             |
 | 1002 | 10002         | 14502      | :102             |
+
+## VS Code 拡張機能
+
+拡張機能は **root がマスターセットを一元管理し、各ユーザーには読み取り専用の
+独立したコピーを配布する** 方式です。
+
+```
+scripts/vscode-extensions.list        インストールする拡張機能 ID の一覧（編集して追加/削除）
+        ↓ install.sh / update-extensions.sh が code --install-extension で構築
+/opt/devbox/vscode-extensions/        マスターセット（root 所有）
+        ↓ adduser.sh（新規ユーザー時）/ update-extensions.sh（既存ユーザー更新時）が rsync で複製
+/home/{username}/.vscode/server-data/extensions/   ユーザーごとの独立コピー（所有者 root、本人は読み取り専用）
+```
+
+| 要件 | 実現方法 |
+|---|---|
+| ユーザー間で干渉しない | 各ユーザーは共有ディレクトリではなく独立したコピーを持つ（`rsync -a --delete` で複製）。あるユーザーの VS Code プロセスが `extensions.json` 等へ書き込んでも他ユーザーには影響しない |
+| root によるアップデートが全ユーザーに反映される | `sudo bash scripts/update-extensions.sh` を実行すると、マスターセットを最新化した上で登録済みの全ユーザーへ再配布し、起動中の `vscode@{username}.service` を再起動して反映する |
+| ユーザー本人による追加インストールを禁止 | 配布後の拡張機能ディレクトリは `chown root:{username}` + `chmod 750`（本人は読み取り・実行のみ）にする。拡張機能に同梱されたネイティブバイナリの実行ビットは維持されるため動作に影響しない。VS Code の拡張機能ビューから「インストール」を実行してもファイル書き込みに失敗し、追加できない |
+
+拡張機能を追加・削除・更新したい場合:
+
+```bash
+# scripts/vscode-extensions.list を編集後
+sudo bash scripts/update-extensions.sh
+
+# 起動中のセッションを止めずに配布だけ行いたい場合（反映は次回接続/再起動時）
+sudo bash scripts/update-extensions.sh --no-restart
+```
+
+## Claude Code CLI
+
+`claude` 本体は **システムに1つだけ**（`/usr/bin/claude`）インストールし、
+VS Code の Claude 拡張機能（`anthropic.claude-code`）はユーザーごとの設定で
+その共有バイナリを起動するようにします。CLI 自体の設定・会話履歴・認証情報は
+実行ユーザーの `$HOME/.claude/` に保存される仕組みのため、バイナリを共有して
+いてもユーザー間のデータは混ざりません。
+
+install.sh が行うこと:
+
+| ステップ | 内容 |
+|---|---|
+| リポジトリ登録 | `/etc/yum.repos.d/claude-code.repo`（`downloads.claude.ai` の公式 rpm リポジトリ） |
+| インストール | `dnf install -y claude-code` |
+| パス記録 | 検出した `claude` の絶対パスを `/etc/devbox/platform.conf` の `CLAUDE_BIN` に保存（adduser.sh が参照） |
+
+adduser.sh が行うこと（ユーザーごと）:
+
+| 処理 | 内容 |
+|---|---|
+| VS Code 拡張機能の連携 | `~/.vscode/server-data/data/User/settings.json` に `"claudeCode.claudeProcessWrapper": "<CLAUDE_BIN>"` を設定（既存の設定は保持したままマージ）。以後、拡張機能から起動される Claude はシステムの `claude` を使う |
+| CLI 設定ファイルの用意 | `~/.claude/settings.json` が無ければ `{}` で作成（既存ファイルは上書きしない） |
+
+いずれもユーザー本人が所有する通常のファイルとして作成されるため、VS Code
+拡張機能側の他の設定や `~/.claude/settings.json` の内容は、これまで通り
+本人が自由に編集できます（拡張機能自体のインストール制限とは別の話です。
+拡張機能のインストール制限については[VS Code 拡張機能](#vs-code-拡張機能)を参照）。
 
 ## LemonLDAP::NG / LLDAP 構成
 

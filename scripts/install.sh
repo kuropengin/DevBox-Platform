@@ -20,6 +20,9 @@ TLS_KEY="${TLS_DIR}/devbox.key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
+# shellcheck source=lib-vscode-extensions.sh
+source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()   { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -250,7 +253,7 @@ echo ""
 # ─── 1. EPEL + 基本パッケージ ─────────────────────────────────────────────────
 info "EPEL リポジトリと基本パッケージをインストール中..."
 dnf install -y epel-release
-dnf install -y curl wget git python3 openssl
+dnf install -y curl wget git python3 openssl rsync
 
 dnf config-manager --set-enabled crb 2>/dev/null || \
   dnf config-manager --set-enabled powertools 2>/dev/null || \
@@ -275,7 +278,67 @@ else
   ok "VS Code は導入済み: $(code --version 2>&1 | head -1)"
 fi
 
-# ─── 3. Xpra + xpra-html5 ─────────────────────────────────────────────────────
+# ─── 3. Java（Eclipse Temurin 25 JDK） ────────────────────────────────────────
+if ! java -version 2>&1 | grep -q '"25'; then
+  info "Java（Temurin 25 JDK）をインストール中..."
+  rpm --import https://packages.adoptium.net/artifactory/api/gpg/key/public
+
+  # Adoptium は AlmaLinux/Rocky 向けの専用リポジトリを提供していないため、
+  # RHEL 系はすべて "rhel" のリポジトリパスを利用する。
+  cat > /etc/yum.repos.d/adoptium.repo << 'REPO_EOF'
+[Adoptium]
+name=Adoptium
+baseurl=https://packages.adoptium.net/artifactory/rpm/rhel/$releasever/$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.adoptium.net/artifactory/api/gpg/key/public
+REPO_EOF
+
+  dnf install -y temurin-25-jdk
+  ok "Java インストール完了: $(java -version 2>&1 | head -1)"
+else
+  ok "Java（25系）は導入済み: $(java -version 2>&1 | head -1)"
+fi
+
+# ─── 4. Claude Code CLI ────────────────────────────────────────────────────────
+# システム全体に一度だけインストールする（dnf パッケージ、ユーザーごとの
+# 個別インストールは不要）。VS Code の Claude 拡張機能はこの CLI を起動する
+# ように adduser.sh がユーザーごとに設定する（claudeCode.claudeProcessWrapper）。
+# CLI 自体の設定・セッション状態は $HOME/.claude/ に保存されるため、
+# バイナリを共有していてもユーザー間で干渉しない。
+if ! command -v claude &>/dev/null; then
+  info "Claude Code CLI をインストール中..."
+  cat > /etc/yum.repos.d/claude-code.repo << 'REPO_EOF'
+[claude-code]
+name=Claude Code
+baseurl=https://downloads.claude.ai/claude-code/rpm/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://downloads.claude.ai/keys/claude-code.asc
+REPO_EOF
+  dnf install -y claude-code
+  ok "Claude Code CLI インストール完了: $(claude --version 2>&1 | head -1)"
+else
+  ok "Claude Code CLI は導入済み: $(claude --version 2>&1 | head -1)"
+fi
+CLAUDE_BIN="$(command -v claude)"
+
+# ─── 5. VS Code 拡張機能（マスターセットを root が管理） ─────────────────────
+# ここでは root 専用のマスターディレクトリに拡張機能をインストールするだけで、
+# 実際の配布は adduser.sh（新規ユーザー作成時）と update-extensions.sh
+# （既存ユーザーへの更新反映）が行う。各ユーザーには独立したコピーを
+# 配布し、本人には読み取り専用の権限しか与えないため、
+#   - ユーザー間で拡張機能ディレクトリを共有しない（同時書き込みによる
+#     extensions.json 破損などの干渉が起きない）
+#   - 追加インストール・アンインストールは root（本スクリプト経由）以外
+#     には行えない
+# という2点を両立する。
+info "VS Code 拡張機能（マスターセット）を準備中..."
+vscode_ext_build_master
+vscode_ext_sync_to_all_users
+ok "VS Code 拡張機能マスターセット準備完了 → ${VSCODE_EXT_MASTER_DIR}"
+
+# ─── 6. Xpra + xpra-html5 ─────────────────────────────────────────────────────
 if ! command -v xpra &>/dev/null; then
   info "Xpra をインストール中..."
   dnf install -y xpra xorg-x11-server-Xvfb xauth xorg-x11-utils \
@@ -290,7 +353,7 @@ else
   ok "Xpra は導入済み: $(xpra --version 2>&1 | head -1)"
 fi
 
-# ─── 4. XFCE デスクトップ ─────────────────────────────────────────────────────
+# ─── 7. XFCE デスクトップ ─────────────────────────────────────────────────────
 if ! command -v xfce4-session &>/dev/null; then
   info "XFCE をインストール中..."
   dnf install -y xfce4-session xfce4-terminal xfwm4 xfdesktop xfce4-panel Thunar
@@ -299,7 +362,7 @@ else
   ok "XFCE は導入済み"
 fi
 
-# ─── 5. nginx ──────────────────────────────────────────────────────────────────
+# ─── 8. nginx ──────────────────────────────────────────────────────────────────
 if ! command -v nginx &>/dev/null; then
   info "nginx をインストール中..."
   dnf install -y nginx
@@ -307,7 +370,7 @@ fi
 systemctl enable nginx
 ok "nginx 準備完了: $(nginx -v 2>&1)"
 
-# ─── 6. TLS 証明書（自己署名） ─────────────────────────────────────────────────
+# ─── 9. TLS 証明書（自己署名） ─────────────────────────────────────────────────
 # VS Code Web の webview（拡張機能の Webview、Markdown プレビュー等）はブラウザの
 # Web Crypto API（crypto.subtle）を使うが、これは HTTPS（セキュアコンテキスト）
 # でしか利用できない。閉域網でも動くよう、外部の認証局を使わない自己署名証明書
@@ -325,14 +388,14 @@ else
   ok "TLS 証明書は既存のものを使用: ${TLS_CERT}"
 fi
 
-# ─── 7. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
+# ─── 10. SELinux — nginx のプロキシ通信を許可 ──────────────────────────────────
 if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
   info "SELinux ポリシーを設定中..."
   setsebool -P httpd_can_network_connect 1 || warn "setsebool に失敗しました（続行します）"
   ok "SELinux: httpd_can_network_connect 有効"
 fi
 
-# ─── 8. firewalld — HTTP/HTTPS を開放 ─────────────────────────────────────────
+# ─── 11. firewalld — HTTP/HTTPS を開放 ─────────────────────────────────────────
 if systemctl is-active --quiet firewalld 2>/dev/null; then
   info "firewalld で HTTP/HTTPS を開放中..."
   firewall-cmd --permanent --add-service=http
@@ -341,7 +404,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   ok "firewalld 設定完了"
 fi
 
-# ─── 9. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
+# ─── 12. LLDAP + LemonLDAP::NG セットアップ ────────────────────────────────────
 LLDAP_ENABLED="no"
 LLDAP_ADMIN_URL="http://127.0.0.1:17170"
 
@@ -357,7 +420,7 @@ else
   fi
 fi
 
-# ─── 10. ディレクトリ作成 ──────────────────────────────────────────────────────
+# ─── 13. ディレクトリ作成 ──────────────────────────────────────────────────────
 info "ディレクトリを作成中..."
 mkdir -p "${DEVBOX_DIR}/portal" /etc/devbox/users /etc/nginx/conf.d/devbox-users
 
@@ -368,12 +431,12 @@ elif command -v chcon &>/dev/null; then
 fi
 ok "ディレクトリ作成完了"
 
-# ─── 11. ポータル HTML ────────────────────────────────────────────────────────
+# ─── 14. ポータル HTML ────────────────────────────────────────────────────────
 info "ポータル HTML をコピー中..."
 cp "${REPO_DIR}/portal/index.html" "${DEVBOX_DIR}/portal/index.html"
 ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
-# ─── 12. systemd テンプレートユニット ────────────────────────────────────────
+# ─── 15. systemd テンプレートユニット ────────────────────────────────────────
 info "systemd ユニットをインストール中..."
 for unit in devbox@.target vscode@.service xpra@.service; do
   cp "${REPO_DIR}/systemd/${unit}" "/etc/systemd/system/${unit}"
@@ -381,7 +444,7 @@ done
 systemctl daemon-reload
 ok "systemd ユニットインストール完了"
 
-# ─── 13. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
+# ─── 16. プラットフォーム設定を保存（adduser.sh が参照） ─────────────────────
 LLDAP_ADMIN_USER=""
 LLDAP_ADMIN_PASSWORD=""
 [[ -f /etc/devbox/lldap.env ]] && {
@@ -396,10 +459,11 @@ LLDAP_BASE_DN=${LLDAP_BASE_DN}
 LLDAP_ADMIN_USER=${LLDAP_ADMIN_USER}
 LLDAP_ADMIN_PASSWORD=${LLDAP_ADMIN_PASSWORD}
 LLDAP_ENABLED=${LLDAP_ENABLED}
+CLAUDE_BIN=${CLAUDE_BIN}
 PLATFORM_EOF
 chmod 600 /etc/devbox/platform.conf
 
-# ─── 14. nginx メイン設定 ─────────────────────────────────────────────────────
+# ─── 17. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
 
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then

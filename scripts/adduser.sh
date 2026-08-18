@@ -15,6 +15,13 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib-vscode-extensions.sh
+source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
+# shellcheck source=lib-claude.sh
+source "${SCRIPT_DIR}/lib-claude.sh"
+
 DEVBOX_DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 DEVBOX_DIR="/opt/devbox"
 VSCODE_PORT_BASE=10000
@@ -94,7 +101,25 @@ CREATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
 ok "設定ファイル → /etc/devbox/users/${USERNAME}.conf"
 
-# ─── 4. systemd ユニット有効化 ─────────────────────────────────────────────────
+# ─── 4. VS Code 拡張機能を配布 ─────────────────────────────────────────────────
+# マスターセット（root 管理、install.sh / update-extensions.sh が更新）から
+# 独立したコピーを配布する。本人には読み取り専用の権限しか与えないため、
+# 追加インストール・アンインストールはできない。
+info "VS Code 拡張機能を配布中..."
+vscode_ext_sync_to_user "$USERNAME"
+ok "VS Code 拡張機能を配布完了（${USERNAME} は読み取り専用）"
+
+# ─── 5. Claude Code CLI 連携 ───────────────────────────────────────────────────
+# システムにインストール済みの claude CLI を VS Code の Claude 拡張機能から
+# 起動するよう設定し、CLI 自身の設定ファイル（$HOME/.claude/settings.json）を
+# 用意する。どちらも当該ユーザーのホーム配下に作成されるため他ユーザーとは
+# 独立している。
+info "Claude Code CLI を設定中..."
+claude_configure_vscode_extension "$USERNAME"
+claude_setup_user_settings "$USERNAME"
+ok "Claude Code CLI 設定完了（claude: ${CLAUDE_BIN:-$(command -v claude || echo 未検出)}）"
+
+# ─── 6. systemd ユニット有効化 ─────────────────────────────────────────────────
 info "systemd ユニットを有効化中..."
 # code-server と xpra に CPUQuota/MemoryMax のドロップインを作成
 for service in "vscode@${USERNAME}" "xpra@${USERNAME}"; do
@@ -115,7 +140,7 @@ systemctl enable --now \
   "devbox@${USERNAME}.target"
 ok "systemd: devbox@${USERNAME}.target 有効化完了 (vscode@${USERNAME} / xpra@${USERNAME})"
 
-# ─── 5. nginx 設定追加 ─────────────────────────────────────────────────────────
+# ─── 7. nginx 設定追加 ─────────────────────────────────────────────────────────
 info "nginx 設定を追加中..."
 mkdir -p /etc/nginx/conf.d/devbox-users
 
@@ -164,7 +189,7 @@ NGINX_EOF
 nginx -t && systemctl reload nginx
 ok "nginx 設定追加完了 → /etc/nginx/conf.d/devbox-users/${USERNAME}.conf"
 
-# ─── 6. LLDAP ユーザー登録（任意） ──────────────────────────────────────────────
+# ─── 8. LLDAP ユーザー登録（任意） ──────────────────────────────────────────────
 USER_LDAP_PASS=""
 if [[ -n "${LLDAP_ADMIN_PASSWORD:-}" && -n "${LLDAP_URL:-}" ]]; then
   info "LLDAP にユーザーを追加中..."
@@ -212,7 +237,7 @@ else
   warn "手動で追加: LLDAP_URL=... LLDAP_ADMIN_PASSWORD=... bash adduser.sh ${USERNAME}"
 fi
 
-# ─── 7. LemonLDAP::NG 認可ルール追加（本人以外は /${USERNAME}/ にアクセス不可に） ──
+# ─── 9. LemonLDAP::NG 認可ルール追加（本人以外は /${USERNAME}/ にアクセス不可に） ──
 if [[ "${LLDAP_ENABLED:-no}" == "yes" ]]; then
   info "LemonLDAP::NG に認可ルールを追加中..."
 
