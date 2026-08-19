@@ -45,11 +45,21 @@ vscode_ext_build_master() {
 # 引数: $1 = ユーザー名
 vscode_ext_sync_to_user() {
   local username="$1"
-  local target_dir="/home/${username}/.vscode/server-data/extensions"
+  local vscode_dir="/home/${username}/.vscode"
+  local server_data_dir="${vscode_dir}/server-data"
+  local target_dir="${server_data_dir}/extensions"
 
   [[ -d "$VSCODE_EXT_MASTER_DIR" ]] || return 0
 
   mkdir -p "$target_dir"
+
+  # mkdir -p は root 実行のため、ここまでで作られた .vscode/server-data も
+  # root 所有のまま残ってしまう。この2つは vscode@.service の
+  # ExecStartPre（cli-data 作成）や code serve-web 自体の実行時データ
+  # 書き込み先として、本人が書き込める必要があるため、先にユーザー本人へ
+  # 所有権を戻しておく（ロックダウンするのは extensions ディレクトリだけ）。
+  chown "${username}:${username}" "$vscode_dir" "$server_data_dir"
+
   rsync -a --delete "${VSCODE_EXT_MASTER_DIR}/" "${target_dir}/"
 
   # root が所有し、対象ユーザーは読み取り・実行のみ可能にする。既存の
