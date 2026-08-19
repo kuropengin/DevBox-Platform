@@ -528,22 +528,29 @@ front↔backend間の内部通信ポートは固定で **80** です
 ## VS Code 拡張機能
 
 以下はすべて **backend 側** の話です。拡張機能は **root がマスターセット
-を一元管理し、各ユーザーには読み取り専用の独立したコピーを配布する** 方式
-です。
+を一元管理し、各ユーザーには独立したコピーを配布する** 方式です。
 
 ```
 scripts/backend/vscode-extensions.list        インストールする拡張機能 ID の一覧（編集して追加/削除）
         ↓ install-backend.sh / update-extensions.sh が code --install-extension で構築
 /opt/devbox/vscode-extensions/        マスターセット（root 所有）
         ↓ adduser-backend.sh（新規ユーザー時）/ update-extensions.sh（既存ユーザー更新時）が rsync で複製
-/home/{username}/.vscode/server-data/extensions/   ユーザーごとの独立コピー（所有者 root、本人は読み取り専用）
+/home/{username}/.vscode/server-data/extensions/   ユーザーごとの独立コピー
 ```
+
+配布後の権限は **2階層**になっています（[lib-vscode-extensions.sh](scripts/backend/lib-vscode-extensions.sh)
+の `vscode_ext_sync_to_user()`）:
+
+| 階層 | 権限 | 目的 |
+|---|---|---|
+| `extensions/` 直下（トップレベル） | `chown root:{username}` + `chmod 750`（本人は読み取り・実行のみ） | 拡張機能の新規追加・アンインストール（＝トップレベルへのディレクトリ作成・削除）を禁止する |
+| 各拡張機能フォルダ（`vscjava.vscode-java-debug-x.y.z/` 等）の中身 | `chown -R {username}:{username}`（本人が読み書き可能） | 一部の拡張機能は本来 VS Code が提供する `globalStorage` 等ではなく**自身のインストールディレクトリ内**に実行時ファイルを書き込む実装になっており（拡張機能側の実装上の問題）、そこが読み取り専用だと `activate()` 自体が失敗するため（実例は下記） |
 
 | 要件 | 実現方法 |
 |---|---|
-| ユーザー間で干渉しない | 各ユーザーは共有ディレクトリではなく独立したコピーを持つ（`rsync -a --delete` で複製）。あるユーザーの VS Code プロセスが `extensions.json` 等へ書き込んでも他ユーザーには影響しない |
-| root によるアップデートが同一backend内の全ユーザーに反映される | そのbackendで `sudo bash scripts/backend/update-extensions.sh` を実行すると、マスターセットを最新化した上で登録済みの全ユーザーへ再配布し、起動中の `vscode@{username}.service` を再起動して反映する |
-| ユーザー本人による追加インストールを禁止 | 配布後の拡張機能ディレクトリは `chown root:{username}` + `chmod 750`（本人は読み取り・実行のみ）にする。拡張機能に同梱されたネイティブバイナリの実行ビットは維持されるため動作に影響しない。VS Code の拡張機能ビューから「インストール」を実行してもファイル書き込みに失敗し、追加できない |
+| ユーザー間で干渉しない | 各ユーザーは共有ディレクトリではなく独立したコピーを持つ（`rsync -a --delete` で複製）。あるユーザーの VS Code プロセスが拡張機能フォルダへ書き込んでも他ユーザーには影響しない |
+| root によるアップデートが同一backend内の全ユーザーに反映される | そのbackendで `sudo bash scripts/backend/update-extensions.sh` を実行すると、マスターセットを最新化した上で登録済みの全ユーザーへ再配布し、起動中の `vscode@{username}.service` を再起動して反映する。本人が拡張機能フォルダの中身を書き換えていても `rsync --delete` で master の内容に上書きされる（master自体はroot専有で保護） |
+| ユーザー本人による追加インストール・アンインストールを禁止 | トップレベルが `chmod 750` のため、VS Code の拡張機能ビューから「インストール」を実行してもディレクトリ作成に失敗し、追加できない |
 
 拡張機能を追加・削除・更新したい場合（対象の backend で実行）:
 
@@ -554,6 +561,16 @@ sudo bash scripts/backend/update-extensions.sh
 # 起動中のセッションを止めずに配布だけ行いたい場合（反映は次回接続/再起動時）
 sudo bash scripts/backend/update-extensions.sh --no-restart
 ```
+
+実例（上記の2階層構成が必要だった理由）: `vscjava.vscode-java-debug`
+（Java拡張パックに含まれる）の「設定なしデバッグ」機能は
+`<拡張機能のインストールパス>/.noConfigDebugAdapterEndpoints/`
+にファイルを書き込もうとします。拡張機能フォルダの中身が読み取り専用だと
+これが失敗し、デバッグ実行時に
+`Couldn't find a debug adapter descriptor for debug type 'java'`
+というエラーになります。既存ユーザーに修正を適用するには、対象の backend
+で `sudo bash scripts/backend/update-extensions.sh` を実行してください
+（再配布と `vscode@{username}.service` の再起動が行われます）。
 
 ## Apache Tomcat
 

@@ -8,10 +8,21 @@
 #   - 各ユーザーにはマスターの「独立したコピー」を配布する（シンボリックリンク
 #     や共有ディレクトリではない）ため、あるユーザーの VS Code プロセスが
 #     extensions.json 等へ書き込んでも他ユーザーに影響しない。
-#   - 配布後、ユーザー本人はそのコピーに対して読み取り・実行のみ可能
-#     （所有者は root）にする。追加インストール・アンインストールは
-#     ファイルシステムレベルで禁止され、更新は root が本スクリプト経由で
-#     行った場合にのみ全ユーザーへ反映される。
+#   - 配布後、拡張機能ディレクトリ（extensions/）の**トップレベルだけ**
+#     root所有・読み取り専用（本人は読み取り・実行のみ）にする。これにより
+#     拡張機能の追加インストール・アンインストール（＝トップレベルへの
+#     ディレクトリの新規作成・削除）はファイルシステムレベルで禁止される。
+#   - 個々の拡張機能フォルダ（vscjava.vscode-java-debug-x.y.z/ 等）自体は
+#     本人所有にし、中身への書き込みを許可する。一部の拡張機能は本来 VS Code
+#     が提供する globalStorage 等ではなく、自身のインストールディレクトリ
+#     内に実行時ファイルを書き込む実装になっており（拡張機能側の実装上の
+#     問題。例: vscjava.vscode-java-debug の「設定なしデバッグ」機能が
+#     <extensionPath>/.noConfigDebugAdapterEndpoints/ に書き込む）、そこが
+#     読み取り専用だと activate() 自体が失敗するため。個々のファイルを
+#     万一改変されても、次回 update-extensions.sh 実行時に master から
+#     rsync --delete で上書きされ元に戻る（master 自体は root 専有で
+#     保護されている）。
+#   - 更新は root が本スクリプト経由で行った場合にのみ全ユーザーへ反映される。
 
 : "${VSCODE_EXT_MASTER_DIR:=/opt/devbox/vscode-extensions}"
 : "${VSCODE_EXT_CLI_DATA_DIR:=/opt/devbox/vscode-extensions-cli-data}"
@@ -62,12 +73,21 @@ vscode_ext_sync_to_user() {
 
   rsync -a --delete "${VSCODE_EXT_MASTER_DIR}/" "${target_dir}/"
 
-  # root が所有し、対象ユーザーは読み取り・実行のみ可能にする。既存の
-  # 実行ビット（拡張機能に同梱されたネイティブバイナリ等）は go-w では
-  # 変更されないため、拡張機能自体の動作は妨げない。
-  chown -R root:"${username}" "$target_dir"
-  chmod -R go-w "$target_dir"
+  # トップレベル（拡張機能の追加/削除に相当する、新規ディレクトリの作成・
+  # 削除）だけを root 所有・750（本人は読み取り・実行のみ）にすることで、
+  # 追加インストール・アンインストールを禁止する。
+  chown root:"${username}" "$target_dir"
   chmod 750 "$target_dir"
+
+  # 個々の拡張機能フォルダ自体は本人所有にし、中身への読み書きを許可する
+  # （globalStorage の代わりに自分のインストールディレクトリへ書き込む
+  # 実装の拡張機能でも動作するように。上記の通りトップレベルは読み取り
+  # 専用のままなので、拡張機能の新規追加・削除はできない）。
+  local ext_dir
+  for ext_dir in "$target_dir"/*/; do
+    [[ -d "$ext_dir" ]] || continue
+    chown -R "${username}:${username}" "$ext_dir"
+  done
 }
 
 # VS Code User settings に、プラットフォーム共通の既定値をマージ設定する
