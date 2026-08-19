@@ -70,6 +70,41 @@ vscode_ext_sync_to_user() {
   chmod 750 "$target_dir"
 }
 
+# VS Code User settings に、プラットフォーム共通の既定値をマージ設定する
+# （既存キーは保持したままマージ書き込みする。Claude Code固有の設定は
+# lib-claude.sh 側で扱う）
+# 引数: $1 = ユーザー名
+vscode_set_default_settings() {
+  local username="$1"
+  local settings_dir="/home/${username}/.vscode/server-data/data/User"
+  local settings_file="${settings_dir}/settings.json"
+
+  mkdir -p "$settings_dir"
+
+  python3 - "$settings_file" << 'PYEOF'
+import json
+import os
+import sys
+
+settings_file = sys.argv[1]
+
+data = {}
+if os.path.exists(settings_file):
+    with open(settings_file, encoding="utf-8") as f:
+        content = f.read().strip()
+        if content:
+            data = json.loads(content)
+
+data["security.workspace.trust.startupPrompt"] = "always"
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PYEOF
+
+  chown -R "${username}:${username}" "/home/${username}/.vscode/server-data/data"
+}
+
 # 既存の全ユーザー（/etc/devbox/users/*.conf）へ配布する
 vscode_ext_sync_to_all_users() {
   local conf username

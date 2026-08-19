@@ -134,6 +134,18 @@ ${AUTH_BLOCK}
     proxy_set_header   X-Devbox-Token "${DEVBOX_INTERNAL_TOKEN:-}";
     proxy_read_timeout 86400;
 }
+
+# ${USERNAME} 本人が公開したWebアプリ（Tomcat等）への経路。意図的に
+# 認証を行わない（誰でもアクセス可能。詳細はREADMEの「Webアプリの公開」参照）。
+location /${USERNAME}/webapp/ {
+    proxy_pass         http://${BACKEND_ADDR}/${USERNAME}/webapp/;
+    proxy_http_version 1.1;
+    proxy_set_header   Upgrade \$http_upgrade;
+    proxy_set_header   Connection upgrade;
+    proxy_set_header   Host \$host;
+    proxy_set_header   X-Devbox-Token "${DEVBOX_INTERNAL_TOKEN:-}";
+    proxy_read_timeout 86400;
+}
 NGINX_EOF
 # X-Devbox-Token（front→backend間の共有シークレット）を平文で含むため
 # root のみ読み取り可能にする。
@@ -228,6 +240,7 @@ echo ""
 echo "  ポータル : https://${DEVBOX_DOMAIN}/${USERNAME}/"
 echo "  VS Code  : https://${DEVBOX_DOMAIN}/${USERNAME}/vscode/"
 echo "  GUI      : https://${DEVBOX_DOMAIN}/${USERNAME}/gui/"
+echo "  Webアプリ: https://${DEVBOX_DOMAIN}/${USERNAME}/webapp/（認証なし）"
 echo "  backend  : ${BACKEND_ADDR}"
 echo ""
 if [[ -n "$USER_LDAP_PASS" ]]; then

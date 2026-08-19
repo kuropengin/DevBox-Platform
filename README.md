@@ -95,7 +95,19 @@ https://devbox.example.com
   /[username]/         → ポータルページ（静的 HTML、front配信）
   /[username]/vscode/  → VS Code (code serve-web、backend上で実行)
   /[username]/gui/     → Xpra HTML5 デスクトップ（backend上で実行）
+  /[username]/webapp/  → ユーザーが公開したWebアプリ（backend上で実行、認証なし）
+  /_auth/               → LemonLDAP::NG純正ポータル（ログイン・ログアウト・パスワード変更）
 ```
+
+`/[username]/vscode/`・`/[username]/gui/` は本人以外アクセスできませんが、
+`/[username]/webapp/` は認証を行わないため誰でもアクセスできます
+（詳細は[Webアプリの公開（webapp）](#webアプリの公開webapp)）。
+
+ポータル画面には VS Code / GUI デスクトップ / 公開Webアプリ / パスワード
+変更（LemonLDAP::NG純正ポータルへのリンク）へのボタンがあります。VS Code
+は**初回アクセス時のみ** `~/workspace`（adduser-backend.sh が自動作成）を
+自動で開きます（2回目以降は直前に開いていたフォルダ・ワークスペースを
+維持します）。
 
 認証は **LLDAP（LDAP ディレクトリ）+ LemonLDAP::NG（ログイン画面 + nginx
 Forward Auth）** で処理します（front サーバーのみ）。LLDAP は dnf（openSUSE
@@ -277,11 +289,13 @@ adduser-backend.sh が行うこと（backend 上）:
 | 処理 | 内容 |
 |------|------|
 | Linux ユーザー作成 | `useradd` でホームディレクトリ付き作成 |
-| ポート割り当て | UID オフセットで自動計算・競合チェック（backend内でローカルに完結） |
+| 作業フォルダ作成 | `~/workspace` を作成（ポータルの VS Code リンクが初回アクセス時に自動で開く） |
+| ポート割り当て | UID オフセットで自動計算・競合チェック（VS Code / Xpra / Tomcat-webapp用、backend内でローカルに完結） |
 | **VS Code 拡張機能配布** | マスターセットの独立コピーを `~/.vscode/server-data/extensions` へ配布（詳細は[後述](#vs-code-拡張機能)） |
+| **VS Code 既定設定** | `~/.vscode/server-data/data/User/settings.json` に `security.workspace.trust.startupPrompt: always` をマージ設定 |
 | **Claude Code CLI 連携** | VS Code の Claude 拡張機能がシステムの `claude` を起動するよう設定し、`~/.claude/settings.json` を用意。Headroom設定があれば `ANTHROPIC_BASE_URL` 等も設定（詳細は[後述](#claude-code-cli)・[後述](#headroomllmプロキシ)） |
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
-| nginx | `/etc/nginx/conf.d/devbox-backend-users/[username].conf` を生成・リロード（認証なし、ローカルプロキシのみ） |
+| nginx | `/etc/nginx/conf.d/devbox-backend-users/[username].conf` を生成・リロード（認証なし、ローカルプロキシのみ。`webapp` locationも含む。詳細は[後述](#webアプリの公開webapp)） |
 
 register-user.sh が行うこと（front 上）:
 
@@ -289,7 +303,7 @@ register-user.sh が行うこと（front 上）:
 |------|------|
 | 疎通確認 | 指定した backend の `/{username}/vscode/` へ疎通確認（失敗しても続行） |
 | 登録情報保存 | `/etc/devbox/registrations/[username].conf`（どの backend に配置したかを記録） |
-| nginx | `/etc/nginx/conf.d/devbox-front-users/[username].conf` を生成・リロード（認証付き、backend へプロキシ） |
+| nginx | `/etc/nginx/conf.d/devbox-front-users/[username].conf` を生成・リロード（`vscode`/`gui`/ポータルは認証付き、`webapp` のみ認証なしでbackendへプロキシ） |
 | LLDAP | `LLDAP_ADMIN_PASSWORD` がある場合のみ GraphQL API + `lldap_set_password` でユーザー登録 |
 | LemonLDAP::NG | 本人のみ `/{username}/` にアクセスできる認可ルールを追加 |
 
@@ -423,6 +437,10 @@ devbox@{username}.target
 └── xpra@{username}.service     Xpra HTML5      port: 14500 + (UID-1000)
 ```
 
+`TOMCAT_PORT`（18080 + (UID-1000)）は systemd サービスとしては存在せず、
+`/etc/devbox/users/{username}.conf` に予約されるだけのポート番号です
+（詳細は[Webアプリの公開（webapp）](#webアプリの公開webapp)）。
+
 リソース制限（CPU / Memory）はドロップインで管理:
 ```
 /etc/systemd/system/vscode@{username}.service.d/resources.conf
@@ -471,11 +489,11 @@ front 側（nginx / LLDAP / LemonLDAP::NG）は通常の `dnf update -y` で
 調整は不要です（backendが違えばホストも別なので同じポート番号でも衝突
 しません）。
 
-| UID  | VS Code ポート | Xpra ポート | Xpra ディスプレイ |
-|------|---------------|------------|------------------|
-| 1000 | 10000         | 14500      | :100             |
-| 1001 | 10001         | 14501      | :101             |
-| 1002 | 10002         | 14502      | :102             |
+| UID  | VS Code ポート | Xpra ポート | Xpra ディスプレイ | webapp用ポート |
+|------|---------------|------------|------------------|---------------|
+| 1000 | 10000         | 14500      | :100             | 18080         |
+| 1001 | 10001         | 14501      | :101             | 18081         |
+| 1002 | 10002         | 14502      | :102             | 18082         |
 
 front↔backend間の内部通信ポートは固定で **80** です
 （`DEVBOX_BACKEND_PORT`）。
@@ -533,13 +551,17 @@ https://archive.apache.org/dist/tomcat/tomcat-{9,11}/   最新パッチバージ
 
 各ユーザーが自分用のインスタンスを動かす場合は、`CATALINA_HOME` は
 共有ディレクトリを指したまま、`CATALINA_BASE` だけ自分のホーム配下に
-用意してください（Tomcat 標準の複数インスタンス構成）。
+用意してください（Tomcat 標準の複数インスタンス構成）。ポートは
+`$TOMCAT_PORT`（VS Code の統合ターミナルで参照可能。詳細は
+[Webアプリの公開（webapp）](#webアプリの公開webapp)）を
+`conf/server.xml` の HTTP コネクタに指定してください。
 
 ```bash
 export CATALINA_HOME=/opt/devbox/tomcat/tomcat9
 export CATALINA_BASE=~/tomcat9-instance
 mkdir -p "$CATALINA_BASE"/{conf,logs,temp,webapps,work}
 cp "$CATALINA_HOME"/conf/* "$CATALINA_BASE"/conf/
+sed -i "s/port=\"8080\"/port=\"${TOMCAT_PORT}\"/" "$CATALINA_BASE"/conf/server.xml
 "$CATALINA_HOME"/bin/startup.sh
 ```
 
@@ -549,6 +571,33 @@ cp "$CATALINA_HOME"/conf/* "$CATALINA_BASE"/conf/
 sudo bash scripts/backend/update-tomcat.sh        # 9・11 の両方を最新パッチへ
 sudo bash scripts/backend/update-tomcat.sh 9      # 9 系のみ
 ```
+
+## Webアプリの公開（webapp）
+
+各ユーザーには VS Code / Xpra と同様に、Web アプリ公開用のポート
+（`$TOMCAT_PORT`、UIDから自動計算）が1つ割り当てられます。**Tomcat等の
+起動・設定はユーザー本人が行います**（プラットフォーム側で自動的に
+インスタンスを起動することはありません）。
+
+```
+ユーザーが 127.0.0.1:$TOMCAT_PORT で何かを起動する
+        ↓
+https://<front>/{username}/webapp/  でアクセス可能
+```
+
+- `$TOMCAT_PORT` は VS Code の統合ターミナルから環境変数として参照でき
+  ます（`$VSCODE_PORT`/`$XPRA_PORT`/`$XPRA_DISPLAY` と同じ仕組みで、
+  `/etc/devbox/users/{username}.conf` が `vscode@.service` の
+  `EnvironmentFile` として読み込まれ、そこから起動される全プロセス
+  （統合ターミナル含む）に伝播します）。
+- Tomcat に限らず、127.0.0.1:`$TOMCAT_PORT` で Listen する任意のアプリ
+  （Node.js、Flask 等）を公開できます。
+- **`/{username}/webapp/` は意図的に認証を行いません**（LemonLDAP::NGの
+  `auth_request` を通しません）。ポータルの「公開 Web アプリ」ボタンや
+  URLを知っていれば誰でもアクセスできるため、機密情報を扱うアプリは
+  公開しないでください。
+- まだ何も起動していない状態でアクセスすると 502 Bad Gateway になります
+  （想定通りの動作です）。
 
 ## Claude Code CLI
 

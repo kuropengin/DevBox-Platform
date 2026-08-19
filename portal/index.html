@@ -112,6 +112,25 @@
         </span>
         <span class="arrow">↗</span>
       </a>
+      <a class="link-btn" id="webapp-link" target="_blank" rel="noopener">
+        <span class="icon">🌐</span>
+        <span class="text">
+          <span class="label">公開 Web アプリ</span>
+          <span class="desc">Tomcat等、自分で起動したアプリ（認証なし）</span>
+        </span>
+        <span class="arrow">↗</span>
+      </a>
+    </div>
+    <hr class="divider" />
+    <div class="links">
+      <a class="link-btn" id="password-link" href="/_auth/" target="_blank" rel="noopener">
+        <span class="icon">🔑</span>
+        <span class="text">
+          <span class="label">パスワード変更</span>
+          <span class="desc">ログインパスワードを変更する</span>
+        </span>
+        <span class="arrow">↗</span>
+      </a>
     </div>
     <hr class="divider" />
     <a class="logout-link" href="/_auth/?logout=1">ログアウト</a>
@@ -131,8 +150,20 @@
     } else {
       const base = '/' + username;
       document.getElementById('username-label').textContent = username;
-      document.getElementById('vscode-link').href = base + '/vscode/';
-      document.getElementById('gui-link').href   = base + '/gui/';
+
+      // 初回アクセス時だけ ~/workspace を自動で開く（2回目以降は素の
+      // vscode/ にして、ユーザーが開いていた別フォルダを維持できるように
+      // する）
+      let vscodeHref = base + '/vscode/';
+      const workspaceOpenedKey = 'devbox-workspace-opened-' + username;
+      if (!localStorage.getItem(workspaceOpenedKey)) {
+        vscodeHref += '?folder=' + encodeURIComponent('/home/' + username + '/workspace');
+        localStorage.setItem(workspaceOpenedKey, '1');
+      }
+      document.getElementById('vscode-link').href = vscodeHref;
+
+      document.getElementById('gui-link').href    = base + '/gui/';
+      document.getElementById('webapp-link').href = base + '/webapp/';
       document.getElementById('content').style.display = 'block';
     }
   </script>
