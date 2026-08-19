@@ -62,4 +62,6 @@ else
   echo -e "${YELLOW}  一括アップデートが一部失敗しました（Tomcat）${NC}"
 fi
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-[[ "$RESTART" == "no" ]] && warn "--no-restart 指定のため、各ユーザーの VS Code は手動再起動（または再接続）が必要です"
+if [[ "$RESTART" == "no" ]]; then
+  warn "--no-restart 指定のため、各ユーザーの VS Code は手動再起動（または再接続）が必要です"
+fi

@@ -36,4 +36,6 @@ vscode_ext_update_all "$RESTART"
 
 echo ""
 ok "拡張機能の更新が完了しました"
-[[ "$RESTART" == "no" ]] && warn "--no-restart 指定のため、各ユーザーの VS Code は手動再起動（または再接続）が必要です"
+if [[ "$RESTART" == "no" ]]; then
+  warn "--no-restart 指定のため、各ユーザーの VS Code は手動再起動（または再接続）が必要です"
+fi

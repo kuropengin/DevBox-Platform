@@ -23,4 +23,10 @@ devbox_validate_username() {
   for reserved in "${DEVBOX_RESERVED_USERNAMES[@]}"; do
     [[ "$username" == "$reserved" ]] && die "'${username}' は予約語のため使用できません"
   done
+
+  # ループの最後の比較が false（= 予約語ではない、正常系）で終わると、
+  # 関数の戻り値がそのまま非ゼロになり、呼び出し元で `set -e` により
+  # 何もエラーを出さずスクリプトが停止してしまう。それを防ぐため明示的に
+  # 成功を返す。
+  return 0
 }
