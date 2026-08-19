@@ -498,6 +498,33 @@ front 側（nginx / LLDAP / LemonLDAP::NG）は通常の `dnf update -y` で
 front↔backend間の内部通信ポートは固定で **80** です
 （`DEVBOX_BACKEND_PORT`）。
 
+## 環境変数（VS Code内で利用可能）
+
+`adduser-backend.sh` はユーザーごとに `/etc/devbox/users/{username}.conf`
+を生成します。このファイルは `vscode@.service`/`xpra@.service`
+（[systemd/vscode@.service](systemd/vscode@.service)）の
+`EnvironmentFile=` として読み込まれるため、ここに書かれた変数は
+`code serve-web` プロセス自身と、そこから起動される全ての子プロセス
+（VS Code の統合ターミナル等）に環境変数として引き継がれます。
+つまりユーザーは VS Code のターミナルで `echo $TOMCAT_PORT` のように
+そのまま参照できます。
+
+| 変数 | 内容 |
+|---|---|
+| `USERNAME` | ユーザー名 |
+| `VSCODE_PORT` | `code serve-web` がローカルで待ち受けるポート（`10000 + (UID-1000)`） |
+| `XPRA_PORT` | Xpra HTML5 デスクトップがローカルで待ち受けるポート（`14500 + (UID-1000)`） |
+| `XPRA_DISPLAY` | Xpra の Xディスプレイ番号（`100 + (UID-1000)`、`:100` 形式ではなく数値のみ） |
+| `TOMCAT_PORT` | `/{username}/webapp/` として公開されるポート（`18080 + (UID-1000)`）。詳細は[Webアプリの公開（webapp）](#webアプリの公開webapp) |
+| `CPU_QUOTA` | systemd `CPUQuota` に設定した値（例: `200%`。`adduser-backend.sh --cpu` で指定） |
+| `MEMORY_MAX` | systemd `MemoryMax` に設定した値（例: `4G`。`adduser-backend.sh --mem` で指定） |
+| `CREATED_AT` | ユーザー作成日時（UTC、ISO 8601） |
+
+新しい変数を追加したい場合は `adduser-backend.sh` の
+`/etc/devbox/users/${USERNAME}.conf` を生成する箇所に追記するだけで、
+上記の仕組みにより自動的に VS Code 側からも参照可能になります
+（`vscode@.service`/`xpra@.service` 側の変更は不要）。
+
 ## VS Code 拡張機能
 
 以下はすべて **backend 側** の話です。拡張機能は **root がマスターセット
