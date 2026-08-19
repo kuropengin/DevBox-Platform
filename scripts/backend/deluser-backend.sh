@@ -51,8 +51,25 @@ rm -rf \
   "/etc/systemd/system/xpra@${USERNAME}.service.d"
 
 systemctl daemon-reload
-loginctl disable-linger "$USERNAME" 2>/dev/null || true
 ok "systemd サービス停止・無効化完了"
+
+# adduser-backend.sh が設定した loginctl enable-linger により、devbox@ 等の
+# ユニットを止めても user@<uid>.service（ユーザー本人の systemd セッション）
+# はログインなしで存続し続ける。これを残したまま userdel すると
+# 「currently used by process」で失敗するため、明示的に終了させる。
+loginctl disable-linger "$USERNAME" 2>/dev/null || true
+loginctl terminate-user "$USERNAME" 2>/dev/null || true
+
+info "ユーザーセッションの終了を待機中..."
+for i in $(seq 1 10); do
+  pgrep -u "$USERNAME" &>/dev/null || break
+  sleep 1
+done
+if pgrep -u "$USERNAME" &>/dev/null; then
+  warn "${USERNAME} のプロセスがまだ残っています。強制終了します..."
+  pkill -9 -u "$USERNAME" 2>/dev/null || true
+  sleep 1
+fi
 
 # ─── 2. nginx 設定を削除 ───────────────────────────────────────────────────────
 BACKEND_CONF="/etc/nginx/conf.d/devbox-backend-users/${USERNAME}.conf"
