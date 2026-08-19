@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # DevBox Platform - backend ユーザー追加スクリプト（backend サーバー上で実行）
-# 使い方: sudo bash adduser-backend.sh <username> [オプション]
+# 使い方: sudo bash adduser-backend.sh <username> <email> [オプション]
 #
 # オプション:
 #   --cpu    CPU上限（systemd CPUQuota、例: 200%）  デフォルト: 200%
 #   --mem    メモリ上限（MemoryMax、例: 4G）         デフォルト: 4G
+#
+# email は Headroom（front側LLMプロキシ）経由で Claude を使う際の
+# X-User-Id ヘッダに使われる（詳細は lib-claude.sh・README の
+# 「Headroom」セクション参照）。
 #
 # このスクリプトは Linux ユーザー・systemd サービス・backend ローカルの
 # nginx 設定のみを作成する（認証は front 側の役割のため、ここでは行わない）。
@@ -22,13 +26,18 @@ source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
 # shellcheck source=lib-claude.sh
 source "${SCRIPT_DIR}/lib-claude.sh"
 
+# backend-platform.conf が存在すれば設定を読み込む（install-backend.sh が生成、
+# HEADROOM_BASE_URL / DEVBOX_HEADROOM_TOKEN）
+[[ -f /etc/devbox/backend-platform.conf ]] && source /etc/devbox/backend-platform.conf
+
 VSCODE_PORT_BASE=10000
 XPRA_PORT_BASE=14500
 
-[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash adduser-backend.sh <username>"
-[[ $# -lt 1 ]]    && die "使い方: bash adduser-backend.sh <username> [--cpu 200%] [--mem 4G]"
+[[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash adduser-backend.sh <username> <email>"
+[[ $# -lt 2 ]]    && die "使い方: bash adduser-backend.sh <username> <email> [--cpu 200%] [--mem 4G]"
 
 USERNAME="$1"; shift
+EMAIL="$1"; shift
 
 # ─── 引数パース ───────────────────────────────────────────────────────────────
 CPU_QUOTA="200%"
@@ -43,10 +52,14 @@ done
 
 # ─── バリデーション ────────────────────────────────────────────────────────────
 devbox_validate_username "$USERNAME"
+devbox_validate_email "$EMAIL"
 id "$USERNAME" &>/dev/null && die "ユーザー '$USERNAME' はすでに存在します"
+if [[ -z "${HEADROOM_BASE_URL:-}" || -z "${DEVBOX_HEADROOM_TOKEN:-}" ]]; then
+  warn "HEADROOM_BASE_URL/DEVBOX_HEADROOM_TOKEN が未設定です。${USERNAME} は Claude Code を使えません"
+fi
 
 echo ""
-info "ユーザー '$USERNAME' を追加します (CPU: ${CPU_QUOTA}, Memory: ${MEMORY_MAX})"
+info "ユーザー '$USERNAME' を追加します (email: ${EMAIL}, CPU: ${CPU_QUOTA}, Memory: ${MEMORY_MAX})"
 echo ""
 
 # ─── 1. Linux ユーザー作成 ─────────────────────────────────────────────────────
@@ -97,10 +110,11 @@ ok "VS Code 拡張機能を配布完了（${USERNAME} は読み取り専用）"
 # システムにインストール済みの claude CLI を VS Code の Claude 拡張機能から
 # 起動するよう設定し、CLI 自身の設定ファイル（$HOME/.claude/settings.json）を
 # 用意する。どちらも当該ユーザーのホーム配下に作成されるため他ユーザーとは
-# 独立している。
+# 独立している。HEADROOM_BASE_URL/DEVBOX_HEADROOM_TOKEN が設定されていれば、
+# Headroom（front側LLMプロキシ）経由で Claude を使うよう合わせて設定する。
 info "Claude Code CLI を設定中..."
-claude_configure_vscode_extension "$USERNAME"
-claude_setup_user_settings "$USERNAME"
+claude_configure_vscode_extension "$USERNAME" "$EMAIL" "${HEADROOM_BASE_URL:-}" "${DEVBOX_HEADROOM_TOKEN:-}"
+claude_setup_user_settings "$USERNAME" "$EMAIL" "${HEADROOM_BASE_URL:-}" "${DEVBOX_HEADROOM_TOKEN:-}"
 ok "Claude Code CLI 設定完了（claude: $(command -v claude || echo 未検出)）"
 
 # ─── 6. systemd ユニット有効化 ─────────────────────────────────────────────────

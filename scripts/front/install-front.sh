@@ -17,6 +17,9 @@
 #   DEVBOX_DOMAIN          例: devbox.example.com  (デフォルト: devbox.example.com)
 #   LLDAP_ADMIN_PASSWORD   初期管理者パスワード（未設定時は自動生成）
 #   SKIP_LLDAP=yes         LLDAP / LemonLDAP::NG のセットアップをスキップ
+#   ANTHROPIC_API_KEY      必須。Headroom（LLMプロキシ）が使う実 Anthropic APIキー
+#   BACKEND_ALLOWED_SOURCES  Headroomのポートを許可する backend の IP/CIDR
+#                            （カンマ区切りで複数可）。未設定時は一切開放しない
 
 set -euo pipefail
 
@@ -27,6 +30,7 @@ LLNG_CLI="/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli"
 TLS_DIR="/etc/devbox/tls"
 TLS_CERT="${TLS_DIR}/devbox.crt"
 TLS_KEY="${TLS_DIR}/devbox.key"
+DEVBOX_HEADROOM_PORT=8787
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
@@ -339,7 +343,83 @@ info "ポータル HTML をコピー中..."
 cp "${REPO_DIR}/portal/index.html" "${DEVBOX_DIR}/portal/index.html"
 ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
-# ─── 9. プラットフォーム設定を保存（register-user.sh が参照） ────────────────
+# ─── 9. Headroom（LLMプロキシ） ────────────────────────────────────────────────
+# 各ユーザーが Anthropic の実 API キーを個別に持たずに済むよう、front に
+# Headroom を導入し、実キーは front だけが保持する。backend 上のユーザーは
+# ANTHROPIC_BASE_URL でここを経由する（scripts/backend/lib-claude.sh 参照）。
+[[ -z "${ANTHROPIC_API_KEY:-}" ]] && die "ANTHROPIC_API_KEY が未設定です。install-front.env に指定してください"
+
+info "Headroom（LLMプロキシ）をインストール中..."
+if ! command -v python3.11 &>/dev/null; then
+  # headroom-ai は Python 3.10 以上が必須。RHEL 9 系の既定 python3 は 3.9 の
+  # ため、AppStream の python3.11 を別途インストールして使う（実機確認済み:
+  # 既定 python3.9 では "No matching distribution found" で失敗する）。
+  dnf install -y python3.11 python3.11-pip
+fi
+if ! command -v headroom &>/dev/null; then
+  python3.11 -m pip install "headroom-ai[proxy]"
+fi
+HEADROOM_BIN="$(command -v headroom || echo "")"
+if [[ -z "$HEADROOM_BIN" ]]; then
+  die "headroom コマンドが見つかりません（pip install に失敗した可能性があります）"
+elif [[ "$HEADROOM_BIN" != "/usr/local/bin/headroom" ]]; then
+  warn "headroom の実体が /usr/local/bin/headroom ではありません（${HEADROOM_BIN}）"
+  warn "  systemd/headroom.service の ExecStart パスを合わせて修正してください"
+fi
+ok "Headroom インストール完了: $(headroom --version 2>&1 | head -1)"
+
+# front↔backend（Headroomクライアント）間の共有シークレット。
+# DEVBOX_INTERNAL_TOKEN（backend→front用、逆方向）とは別のトークン。
+# 既存インストールを再実行した場合は既存の値を使い回す。
+DEVBOX_HEADROOM_TOKEN="${DEVBOX_HEADROOM_TOKEN:-}"
+if [[ -z "$DEVBOX_HEADROOM_TOKEN" && -f /etc/devbox/platform.conf ]]; then
+  DEVBOX_HEADROOM_TOKEN=$(grep '^DEVBOX_HEADROOM_TOKEN=' /etc/devbox/platform.conf | cut -d= -f2 || echo "")
+fi
+[[ -z "$DEVBOX_HEADROOM_TOKEN" ]] && DEVBOX_HEADROOM_TOKEN=$(openssl rand -hex 32)
+
+# Headroom は ANTHROPIC_API_KEY 環境変数だけでは上流(Anthropic)を認証しない
+# （実機検証済み。設定しても upstream へ x-api-key が付与されず
+# "x-api-key header is required" で拒否される）。ANTHROPIC_TARGET_API_HEADERS
+# で x-api-key・anthropic-version を強制上書き注入させるのが正しい方法。
+# この値は内部にダブルクォートを含む JSON なので、systemd/headroom.service
+# が bash 経由で source する前提でシングルクォートで囲む（実機検証済み:
+# ダブルクォートを裸で置くと bash の source 時にクォートが剥がされ壊れる）。
+mkdir -p /etc/devbox
+cat > /etc/devbox/headroom.env << HEADROOM_EOF
+ANTHROPIC_TARGET_API_HEADERS='{"x-api-key":"${ANTHROPIC_API_KEY}","anthropic-version":"2023-06-01"}'
+HEADROOM_PROXY_TOKEN=${DEVBOX_HEADROOM_TOKEN}
+HEADROOM_HOST=0.0.0.0
+HEADROOM_PORT=${DEVBOX_HEADROOM_PORT}
+HEADROOM_EOF
+chmod 600 /etc/devbox/headroom.env
+
+cp "${REPO_DIR}/systemd/headroom.service" /etc/systemd/system/headroom.service
+systemctl daemon-reload
+systemctl enable --now headroom
+ok "Headroom 起動完了（ポート ${DEVBOX_HEADROOM_PORT}）"
+
+# backend からのみ到達可能にする（front→backend の DEVBOX_INTERNAL_TOKEN と
+# 対称の、backend→front 向けのアクセス制限）。
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+  if [[ -n "${BACKEND_ALLOWED_SOURCES:-}" ]]; then
+    info "firewalld で ${DEVBOX_HEADROOM_PORT} 番を backend からのみ開放中..."
+    IFS=',' read -ra _backend_sources <<< "$BACKEND_ALLOWED_SOURCES"
+    for src in "${_backend_sources[@]}"; do
+      src="$(echo -n "$src" | xargs)"
+      [[ -z "$src" ]] && continue
+      firewall-cmd --permanent --zone=public --add-rich-rule="rule family=\"ipv4\" source address=\"${src}\" port protocol=\"tcp\" port=\"${DEVBOX_HEADROOM_PORT}\" accept"
+    done
+    firewall-cmd --reload
+    ok "firewalld 設定完了（許可元: ${BACKEND_ALLOWED_SOURCES}）"
+  else
+    warn "BACKEND_ALLOWED_SOURCES が未設定のため、${DEVBOX_HEADROOM_PORT} 番ポートは firewalld で開放しません"
+    warn "  backend サーバーからの接続を許可するには、後で以下を実行してください:"
+    warn "  firewall-cmd --permanent --zone=public --add-rich-rule='rule family=\"ipv4\" source address=\"<backendのIP>\" port protocol=\"tcp\" port=\"${DEVBOX_HEADROOM_PORT}\" accept'"
+    warn "  firewall-cmd --reload"
+  fi
+fi
+
+# ─── 10. プラットフォーム設定を保存（register-user.sh が参照） ───────────────
 LLDAP_ADMIN_USER=""
 LLDAP_ADMIN_PASSWORD=""
 [[ -f /etc/devbox/lldap.env ]] && {
@@ -366,10 +446,11 @@ LLDAP_ADMIN_USER=${LLDAP_ADMIN_USER}
 LLDAP_ADMIN_PASSWORD=${LLDAP_ADMIN_PASSWORD}
 LLDAP_ENABLED=${LLDAP_ENABLED}
 DEVBOX_INTERNAL_TOKEN=${DEVBOX_INTERNAL_TOKEN}
+DEVBOX_HEADROOM_TOKEN=${DEVBOX_HEADROOM_TOKEN}
 PLATFORM_EOF
 chmod 600 /etc/devbox/platform.conf
 
-# ─── 10. nginx メイン設定 ─────────────────────────────────────────────────────
+# ─── 11. nginx メイン設定 ─────────────────────────────────────────────────────
 info "nginx を設定中..."
 
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then
@@ -505,16 +586,23 @@ echo ""
 echo "次のステップ:"
 echo "  1. backend サーバーで scripts/backend/install-backend.sh を実行"
 echo "     （FRONT_ALLOWED_SOURCE=<このホストのIP/CIDR> と、下記の"
-echo "      DEVBOX_INTERNAL_TOKEN を install-backend.env に指定）"
-echo "  2. backend で scripts/backend/adduser-backend.sh <username> を実行してユーザーを作成"
+echo "      DEVBOX_INTERNAL_TOKEN・HEADROOM_BASE_URL・DEVBOX_HEADROOM_TOKEN"
+echo "      を install-backend.env に指定）"
+echo "  2. backend で scripts/backend/adduser-backend.sh <username> <email> を実行してユーザーを作成"
 echo "  3. この front サーバーで"
 echo "     scripts/front/register-user.sh <username> --backend <backendのIP> を実行して登録"
 echo ""
 echo -e "  ${YELLOW}DEVBOX_INTERNAL_TOKEN${NC}（backend の install-backend.env にそのままコピーしてください）:"
 echo "  ${DEVBOX_INTERNAL_TOKEN}"
 echo ""
-echo "  ※ このトークンは front↔backend間の共有シークレットです。他人に見せず、"
-echo "     /etc/devbox/platform.conf（権限600）にのみ保存されています。"
+echo -e "  ${YELLOW}DEVBOX_HEADROOM_TOKEN${NC}（同じく install-backend.env にコピー）:"
+echo "  ${DEVBOX_HEADROOM_TOKEN}"
+echo ""
+echo -e "  ${YELLOW}HEADROOM_BASE_URL${NC}（同じく install-backend.env に指定）:"
+echo "  http://<このホストのIP>:${DEVBOX_HEADROOM_PORT}"
+echo ""
+echo "  ※ これらのトークンは他人に見せず、/etc/devbox/platform.conf"
+echo "     （権限600）にのみ保存されています。"
 echo ""
 echo "  アクセス: https://${DOMAIN}/<username>/"
 if [[ "$LLDAP_ENABLED" == "yes" ]]; then

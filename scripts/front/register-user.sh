@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DevBox Platform - ユーザー登録スクリプト（front サーバー上で実行）
-# 使い方: sudo bash register-user.sh <username> --backend <host>[:<port>]
+# 使い方: sudo bash register-user.sh <username> --backend <host>[:<port>] [--password <初期パスワード>]
 #
 # 事前に対象の backend サーバーで scripts/backend/adduser-backend.sh <username> を
 # 実行しておくこと。このスクリプトは front 側のみを設定する:
@@ -11,6 +11,10 @@
 # --backend の port を省略した場合は 80（backend の内部ポート既定値）を使う。
 # 既存ユーザーに対して別の --backend を指定して再実行すると、そのユーザーの
 # ルーティング先を別の backend へ移行できる。
+#
+# --password は LLDAP に**新規**ユーザーを作成する場合のみ使われる
+# 初期パスワード（省略時は自動生成。既存ユーザーの場合は無視される
+# ＝再実行してもパスワードは変わらない）。
 #
 # 必要な環境変数（任意。/etc/devbox/platform.conf があれば自動で読み込む）:
 #   LLDAP_URL             例: http://127.0.0.1:17170
@@ -39,9 +43,11 @@ USERNAME="$1"; shift
 
 # ─── 引数パース ───────────────────────────────────────────────────────────────
 BACKEND_ARG=""
+PASSWORD_ARG=""
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --backend) BACKEND_ARG="$2"; shift 2 ;;
+    --backend)  BACKEND_ARG="$2";  shift 2 ;;
+    --password) PASSWORD_ARG="$2"; shift 2 ;;
     *) die "不明なオプション: $1" ;;
   esac
 done
@@ -159,7 +165,7 @@ if [[ -n "${LLDAP_ADMIN_PASSWORD:-}" && -n "${LLDAP_URL:-}" ]]; then
         -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
         -d "{\"query\":\"mutation{createUser(user:{id:\\\"${USERNAME}\\\",email:\\\"${USERNAME}@${DEVBOX_DOMAIN}\\\"}){id}}\"}" \
         -o /dev/null; then
-        USER_LDAP_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+        USER_LDAP_PASS="${PASSWORD_ARG:-$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)}"
         if lldap_set_password \
           --base-url "${LLDAP_URL}" \
           --admin-username "${LLDAP_ADMIN_USER:-admin}" \

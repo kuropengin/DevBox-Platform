@@ -30,3 +30,11 @@ devbox_validate_username() {
   # 成功を返す。
   return 0
 }
+
+# メールアドレスの簡易形式チェック。不正なら die する。
+# 引数: $1 = メールアドレス
+devbox_validate_email() {
+  local email="$1"
+  [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "無効なメールアドレス: $email"
+  return 0
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Headroom LLM proxy for DevBox Platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# /etc/devbox/headroom.env は ANTHROPIC_TARGET_API_HEADERS に生の JSON
+# （内部にダブルクォートを含む値）を格納するため、systemd の
+# EnvironmentFile= 独自パーサーの引用符解釈に依存せず、bash で source して
+# から exec する（bash のクォート処理は動作確認済み）。
+ExecStart=/bin/bash -c 'set -a; source /etc/devbox/headroom.env; set +a; exec /usr/local/bin/headroom proxy'
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -245,7 +245,23 @@ done
 systemctl daemon-reload
 ok "systemd ユニットインストール完了"
 
-# ─── 14. nginx メイン設定（ローカル用途、平文 HTTP、共有シークレットで認証） ──
+# ─── 14. backend プラットフォーム設定を保存（adduser-backend.sh が参照） ─────
+# front の platform.conf に相当する、backend 側の永続設定。Headroom
+# （front側のLLMプロキシ）関連の値をここに保存し、adduser-backend.sh が
+# ユーザー作成のたびに読み込む。値が空でも install-backend.sh 自体は
+# 失敗させない（Headroom未設定のままユーザー作成しようとした場合は
+# adduser-backend.sh 側で warn するに留める）。
+cat > /etc/devbox/backend-platform.conf << BACKEND_PLATFORM_EOF
+HEADROOM_BASE_URL=${HEADROOM_BASE_URL:-}
+DEVBOX_HEADROOM_TOKEN=${DEVBOX_HEADROOM_TOKEN:-}
+BACKEND_PLATFORM_EOF
+chmod 600 /etc/devbox/backend-platform.conf
+if [[ -z "${HEADROOM_BASE_URL:-}" || -z "${DEVBOX_HEADROOM_TOKEN:-}" ]]; then
+  warn "HEADROOM_BASE_URL/DEVBOX_HEADROOM_TOKEN が未設定です。設定するまで"
+  warn "  このbackendで作成したユーザーは Claude Code を使えません"
+fi
+
+# ─── 15. nginx メイン設定（ローカル用途、平文 HTTP、共有シークレットで認証） ──
 # backend の 80 番ポートは firewalld による送信元 IP 制限だけに頼らず、
 # front が付与する共有シークレット（X-Devbox-Token ヘッダ）も必須にする。
 # firewalld が無効/誤設定の環境でも、このヘッダが無い・一致しない直接
@@ -291,7 +307,7 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "次のステップ:"
 echo "  1. このサーバーでユーザーを作成:"
-echo "     sudo bash scripts/backend/adduser-backend.sh <username>"
+echo "     sudo bash scripts/backend/adduser-backend.sh <username> <email>"
 echo "  2. front サーバーで登録:"
 echo "     sudo bash scripts/front/register-user.sh <username> --backend <このサーバーのIP>"
 echo ""

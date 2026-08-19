@@ -121,27 +121,33 @@ front↔backend間は平文HTTPですが、これは外部非公開のプライ�
 devbox-platform/
 ├── portal/
 │   └── index.html                    # ユーザーポータル（静的 HTML、front配信）
+├── user/
+│   ├── README.md                     # user/<IP> ファイルの書式説明
+│   └── <IPアドレス>                   # backendごとのユーザー一覧（autouser.sh が参照）
 ├── systemd/
 │   ├── devbox@.target                # DevBox 管理ターゲット（backendに配置）
 │   ├── vscode@.service               # VS Code serve-web（backendに配置）
-│   └── xpra@.service                 # Xpra HTML5 デスクトップ（backendに配置）
+│   ├── xpra@.service                 # Xpra HTML5 デスクトップ（backendに配置）
+│   └── headroom.service              # Headroom LLMプロキシ（frontに配置）
 └── scripts/
     ├── lib-common.sh                 # 全スクリプト共通のログ関数・ユーザー名検証（front/backend共通）
     ├── front/
-    │   ├── install-front.sh          # front セットアップ（LLDAP / LemonLDAP::NG を含む）
+    │   ├── install-front.sh          # front セットアップ（LLDAP / LemonLDAP::NG / Headroom を含む）
     │   ├── register-user.sh          # front でユーザーを登録（認証・ルーティング）
-    │   └── deregister-user.sh        # front でユーザーの登録を解除
+    │   ├── deregister-user.sh        # front でユーザーの登録を解除
+    │   └── autouser.sh               # user/ 配下との差分をfrontに自動反映
     └── backend/
         ├── install-backend.sh        # backend セットアップ（開発ツール一式）
         ├── adduser-backend.sh        # backend でユーザーの実体を作成
         ├── deluser-backend.sh        # backend でユーザーの実体を削除
+        ├── autouser.sh               # user/ 配下との差分をbackendに自動反映
         ├── update-extensions.sh      # VS Code 拡張機能マスターセットの更新・全ユーザー配布
         ├── update-tomcat.sh          # Tomcat 9 / 11 の更新
         ├── update-all.sh             # dnf update + 拡張機能更新 + Tomcat 更新を一括実行
         ├── lib-vscode-extensions.sh  # 拡張機能マスター管理・配布の共通処理
         ├── vscode-extensions.list    # インストールする拡張機能 ID の一覧
         ├── lib-tomcat.sh             # Tomcat tarball 導入・更新の共通処理
-        └── lib-claude.sh             # Claude Code CLI 連携の共通処理
+        └── lib-claude.sh             # Claude Code CLI 連携（Headroom設定含む）の共通処理
 ```
 
 ## 動作環境
@@ -164,6 +170,9 @@ export DEVBOX_DOMAIN="192.168.11.64"
 # 管理者パスワードを指定（省略時は自動生成）
 export LLDAP_ADMIN_PASSWORD="yourpassword"
 
+# Headroom（LLMプロキシ）が使う実 Anthropic APIキー（必須）
+export ANTHROPIC_API_KEY="sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx"
+
 sudo -E bash scripts/front/install-front.sh
 ```
 
@@ -179,6 +188,7 @@ install-front.sh が行うこと:
 | **LLDAP** | dnf（OBS リポジトリの RPM）でネイティブインストール |
 | **LemonLDAP::NG** | dnf（EPEL 公式パッケージ）でネイティブインストール |
 | ポータル HTML | `/opt/devbox/portal/` へコピー |
+| **Headroom（LLMプロキシ）** | pip でインストールし systemd サービス化（詳細は[後述](#headroomllmプロキシ)） |
 | nginx 設定 | `/etc/nginx/conf.d/devbox-front.conf` を HTTPS + LemonLDAP::NG Forward Auth 付きで生成 |
 
 LLDAP 認証情報は `/etc/devbox/lldap.env`（権限 600）に保存されます。
@@ -205,14 +215,20 @@ export FRONT_ALLOWED_SOURCE="10.0.1.5"
 
 # front で install-front.sh 実行後に表示された値をそのまま指定
 export DEVBOX_INTERNAL_TOKEN="<front の完了メッセージに表示された値>"
+export DEVBOX_HEADROOM_TOKEN="<同じく front の完了メッセージに表示された値>"
+export HEADROOM_BASE_URL="http://10.0.1.5:8787"
 
 sudo -E bash scripts/backend/install-backend.sh
 ```
 
 backend は何台でも追加できます。追加のたびに、そのホストで
 `install-backend.sh` を実行するだけです（front 側の再インストールは
-不要）。`DEVBOX_INTERNAL_TOKEN` は front と backend 全台で共通の値を
-使ってください（front の `/etc/devbox/platform.conf` に保存されています）。
+不要）。`DEVBOX_INTERNAL_TOKEN`・`DEVBOX_HEADROOM_TOKEN` は front と
+backend 全台で共通の値を使ってください（front の
+`/etc/devbox/platform.conf` に保存されています）。
+`HEADROOM_BASE_URL`/`DEVBOX_HEADROOM_TOKEN` が無くても install-backend.sh
+自体は失敗しませんが、未設定のままユーザーを作成すると Claude Code が
+使えません（詳細は[後述](#headroomllmプロキシ)）。
 
 install-backend.sh が行うこと:
 
@@ -242,8 +258,8 @@ install-backend.sh が行うこと:
 
 ```bash
 # ① backend サーバーで実行: ユーザーの実体（Linuxアカウント・systemdサービス）を作成
-sudo bash scripts/backend/adduser-backend.sh yamada
-sudo bash scripts/backend/adduser-backend.sh tanaka --cpu 400% --mem 8G
+sudo bash scripts/backend/adduser-backend.sh yamada yamada@example.com
+sudo bash scripts/backend/adduser-backend.sh tanaka tanaka@example.com --cpu 400% --mem 8G
 
 # ② front サーバーで実行: 認証・ルーティングを登録
 sudo bash scripts/front/register-user.sh yamada --backend 10.0.2.11
@@ -253,6 +269,8 @@ sudo bash scripts/front/register-user.sh tanaka --backend 10.0.2.12
 `--backend` にはユーザーを配置した backend サーバーの IP（または
 `host:port`。port省略時は80）を指定します。**どの backend に
 配置するかは管理者が明示的に選びます**（自動割り当てはしません）。
+`<email>` は Headroom 経由で Claude を使う際の `X-User-Id` ヘッダに
+使われます（詳細は[後述](#headroomllmプロキシ)）。
 
 adduser-backend.sh が行うこと（backend 上）:
 
@@ -261,7 +279,7 @@ adduser-backend.sh が行うこと（backend 上）:
 | Linux ユーザー作成 | `useradd` でホームディレクトリ付き作成 |
 | ポート割り当て | UID オフセットで自動計算・競合チェック（backend内でローカルに完結） |
 | **VS Code 拡張機能配布** | マスターセットの独立コピーを `~/.vscode/server-data/extensions` へ配布（詳細は[後述](#vs-code-拡張機能)） |
-| **Claude Code CLI 連携** | VS Code の Claude 拡張機能がシステムの `claude` を起動するよう設定し、`~/.claude/settings.json` を用意（詳細は[後述](#claude-code-cli)） |
+| **Claude Code CLI 連携** | VS Code の Claude 拡張機能がシステムの `claude` を起動するよう設定し、`~/.claude/settings.json` を用意。Headroom設定があれば `ANTHROPIC_BASE_URL` 等も設定（詳細は[後述](#claude-code-cli)・[後述](#headroomllmプロキシ)） |
 | systemd | `vscode@` / `xpra@` を enable → `devbox@` ターゲットを起動 |
 | nginx | `/etc/nginx/conf.d/devbox-backend-users/[username].conf` を生成・リロード（認証なし、ローカルプロキシのみ） |
 
@@ -332,18 +350,70 @@ backend は80のみとリッスンポートが分かれており、nginx 設定�
 HTTP→HTTPS の自動リダイレクトが効きません（`https://` を明示してください）。
 
 ```bash
-# 1. front を先にインストール（DEVBOX_INTERNAL_TOKEN がここで生成される）
-DEVBOX_DOMAIN=192.168.11.64 sudo -E bash scripts/front/install-front.sh
-# 完了メッセージに表示された DEVBOX_INTERNAL_TOKEN を控えておく
+# 1. front を先にインストール（DEVBOX_INTERNAL_TOKEN・DEVBOX_HEADROOM_TOKEN
+#    がここで生成される。ANTHROPIC_API_KEY は必須）
+DEVBOX_DOMAIN=192.168.11.64 ANTHROPIC_API_KEY="sk-ant-xxxx" \
+  BACKEND_ALLOWED_SOURCES=127.0.0.1 sudo -E bash scripts/front/install-front.sh
+# 完了メッセージに表示された DEVBOX_INTERNAL_TOKEN・DEVBOX_HEADROOM_TOKEN を控えておく
 
 # 2. backend をインストール（自分自身を front とみなし 127.0.0.1 を指定）
 FRONT_ALLOWED_SOURCE=127.0.0.1 DEVBOX_INTERNAL_TOKEN="<上記の値>" \
+  DEVBOX_HEADROOM_TOKEN="<上記の値>" HEADROOM_BASE_URL="http://127.0.0.1:8787" \
   sudo -E bash scripts/backend/install-backend.sh
 
 # 3. ユーザー追加も同一ホストで両方実行
-sudo bash scripts/backend/adduser-backend.sh yamada
+sudo bash scripts/backend/adduser-backend.sh yamada yamada@example.com
 sudo bash scripts/front/register-user.sh yamada --backend 127.0.0.1
 ```
+
+## ユーザーの自動反映（autouser）
+
+`adduser-backend.sh`/`register-user.sh`（追加）・`deluser-backend.sh`/
+`deregister-user.sh`（削除）を都度手動実行する代わりに、`user/` ディレクトリ
+（書式は [user/README.md](user/README.md)）を desired state として GitOps的に
+運用できます。
+
+```
+user/
+├── 10.0.2.11    # backend1 (10.0.2.11) に置くユーザー一覧
+└── 10.0.2.12    # backend2 (10.0.2.12) に置くユーザー一覧
+```
+
+各ファイルの中身は `username:email[:cpu[:mem[:password]]]` を
+1行1ユーザーで列挙したものです（`cpu`/`mem`/`password` は省略可。
+詳細は [user/README.md](user/README.md)）:
+
+```
+yamada:yamada@example.com
+tanaka:tanaka@example.com:100%:2G
+suzuki:suzuki@example.com:150%:3G:S3cr3tPass
+```
+
+運用の流れ:
+
+```bash
+# 1. user/<backendのIP> を編集（追加/削除）してコミット・push
+
+# 2. 対象の backend サーバーで
+git pull && sudo bash scripts/backend/autouser.sh
+
+# 3. front サーバーで
+git pull && sudo bash scripts/front/autouser.sh
+```
+
+| スクリプト | 動作 |
+|---|---|
+| `scripts/backend/autouser.sh` | **自ホストの IP と一致する** `user/<IP>` ファイルだけを desired state とし、`/etc/devbox/users/*.conf` との差分から `adduser-backend.sh`（追加。`cpu`/`mem` 指定があれば `--cpu`/`--mem` として渡す）/ `deluser-backend.sh`（削除）を自動実行 |
+| `scripts/front/autouser.sh` | `user/` 配下の**全ファイル**を desired state とし（front は全backendのユーザーを把握する必要があるため自IPでの絞り込みはしない）、`/etc/devbox/registrations/*.conf` との差分から `register-user.sh --backend <ファイル名のIP>`（登録・別backendへの移行。`password` 指定があれば `--password` として渡す＝新規LLDAPユーザー作成時のみ有効）/ `deregister-user.sh`（登録解除）を自動実行 |
+
+いずれも非対話（確認プロンプト無し）で、cron 等からの定期実行を想定して
+います。削除はデフォルトでホームディレクトリを残します
+（`deluser-backend.sh` のデフォルト動作と統一。誤ってファイルから1行
+消してしまった場合のデータ消失を防ぐため）。完全に削除したい場合は
+`deluser-backend.sh <username> --purge` を手動で実行してください。
+
+`user/` はリポジトリに含まれるため、front・各backendとも同じ内容を
+参照できるよう、実行前に必ず `git pull` してください。
 
 ## systemd 構成（backend）
 
@@ -502,11 +572,76 @@ adduser-backend.sh が行うこと（ユーザーごと）:
 |---|---|
 | VS Code 拡張機能の連携 | `~/.vscode/server-data/data/User/settings.json` に `"claudeCode.claudeProcessWrapper": "<claudeの絶対パス>"` を設定（既存の設定は保持したままマージ）。以後、拡張機能から起動される Claude はシステムの `claude` を使う |
 | CLI 設定ファイルの用意 | `~/.claude/settings.json` が無ければ `{}` で作成（既存ファイルは上書きしない） |
+| **Headroom連携** | `HEADROOM_BASE_URL`/`DEVBOX_HEADROOM_TOKEN` が設定されていれば、両方の設定ファイルに Headroom 経由で Claude を使うための環境変数もマージ書き込みする（詳細は[後述](#headroomllmプロキシ)） |
 
 いずれもユーザー本人が所有する通常のファイルとして作成されるため、VS Code
 拡張機能側の他の設定や `~/.claude/settings.json` の内容は、これまで通り
 本人が自由に編集できます（拡張機能自体のインストール制限とは別の話です。
 拡張機能のインストール制限については[VS Code 拡張機能](#vs-code-拡張機能)を参照）。
+
+## Headroom（LLMプロキシ）
+
+各ユーザーが Anthropic の実 API キーを個別に持たずに済むよう、front に
+[Headroom](https://github.com/headroomlabs-ai/headroom)（LLMトークン圧縮
+プロキシ。`ANTHROPIC_BASE_URL` を向けるだけで Claude Code から使える）を
+導入し、実キーは front だけが保持します。backend 上の各ユーザーは Headroom
+を経由して Claude を使い、リクエストには `X-User-Id: <メールアドレス>`
+ヘッダが付与されます。
+
+```
+front                                          backend（ユーザーごと）
+┌──────────────────────┐                        ┌──────────────────────┐
+│ Headroom（8787番）      │  ← X-Headroom-Proxy-  │ Claude Code CLI        │
+│  ANTHROPIC_TARGET_     │    Token で認証         │  ANTHROPIC_BASE_URL   │
+│  API_HEADERS で実の      │  ← X-User-Id はそのまま │  → Headroom            │
+│  x-api-key を注入して    │    上流Anthropicまで   │  ANTHROPIC_CUSTOM_     │
+│  Anthropicへ            │    転送                │  HEADERS で両方付与     │
+└──────────────────────┘                        └──────────────────────┘
+```
+
+### front 側（install-front.sh）
+
+| ステップ | 内容 |
+|---|---|
+| Python 3.11 | `dnf install python3.11 python3.11-pip`（headroom-ai は Python 3.10 以上が必須。RHEL 9 系の既定 python3 は 3.9 のため別途インストール） |
+| インストール | `python3.11 -m pip install "headroom-ai[proxy]"` |
+| **上流認証** | `ANTHROPIC_TARGET_API_HEADERS` に `x-api-key`/`anthropic-version` を注入して起動（実機検証済み: `ANTHROPIC_API_KEY` 環境変数だけでは Headroom は upstream を認証しない） |
+| **クライアント認証** | `HEADROOM_PROXY_TOKEN`（`DEVBOX_HEADROOM_TOKEN`）を設定し、`X-Headroom-Proxy-Token` ヘッダの無い/誤った直接アクセスを拒否 |
+| systemd | `systemd/headroom.service` を `/etc/systemd/system/` へインストールし `enable --now`（`/etc/devbox/headroom.env` を bash で source してから起動。理由は下記） |
+| firewalld | 8787番を `BACKEND_ALLOWED_SOURCES` からのみ許可（未指定時は一切開放しない） |
+
+`ANTHROPIC_API_KEY` を install-front.env に指定しないと install-front.sh は
+エラーで停止します。
+
+### backend 側（adduser-backend.sh / lib-claude.sh）
+
+`<email>` 引数と `/etc/devbox/backend-platform.conf`（install-backend.sh が
+`HEADROOM_BASE_URL`/`DEVBOX_HEADROOM_TOKEN` から生成）を使い、
+`~/.claude/settings.json` の `env` ブロックと VS Code拡張機能の
+`claudeCode.environmentVariables` の両方に以下を設定します
+（[Claude Code公式ドキュメント](https://code.claude.com/docs/en/llm-gateway-connect)
+の LLMゲートウェイ接続手順に準拠。拡張機能は起動前に独自に資格情報を
+チェックするため、settings.json の env だけでは不十分）:
+
+| 環境変数 | 値 | 目的 |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` | `HEADROOM_BASE_URL` | Headroom を Claude のエンドポイントにする |
+| `ANTHROPIC_AUTH_TOKEN` | `DEVBOX_HEADROOM_TOKEN` | Claude Code 自体のログイン画面を回避するためのダミー資格情報（Headroom自体はこの値を見ない） |
+| `ANTHROPIC_CUSTOM_HEADERS` | `X-Headroom-Proxy-Token: <token>\nX-User-Id: <email>` | 前者はHeadroomクライアント認証用、後者はユーザー識別用。Headroom は `x-headroom-*` 接頭辞のヘッダだけを上流送信前に除去するため、`X-User-Id` は Anthropic まで届く |
+
+`claudeCode.disableLoginPrompt: true` も合わせて設定し、拡張機能側の
+ログイン画面が出ないようにします。`HEADROOM_BASE_URL`/
+`DEVBOX_HEADROOM_TOKEN` が未設定のまま `adduser-backend.sh` を実行した
+場合はこれらの設定を書き込まず、warn を出すだけに留めます（Headroom未導入
+のbackendでも壊れないように）。
+
+### 導入後の確認
+
+Anthropic への実際のリクエストが成功するかは、本物の APIキーが無い環境
+では机上検証できません。導入後は必ず、ユーザーとして `claude` を起動し
+`/status` で `Anthropic base URL` と `Auth token` の行が正しいことを確認し、
+実際にプロンプトを送って応答が返ることを確認してください
+（[トラブルシューティング](https://code.claude.com/docs/en/llm-gateway-connect#troubleshoot-gateway-errors)）。
 
 ## LemonLDAP::NG / LLDAP 構成
 
