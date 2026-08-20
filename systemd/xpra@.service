@@ -8,10 +8,10 @@ Type=simple
 User=%i
 Group=%i
 EnvironmentFile=/etc/devbox/users/%i.conf
-WorkingDirectory=/home/%i
-Environment=HOME=/home/%i
+WorkingDirectory=__USER_HOME_BASE__/%i
+Environment=HOME=__USER_HOME_BASE__/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.xpra /home/%i/.config/xpra'
+ExecStartPre=/bin/bash -c 'mkdir -p __USER_HOME_BASE__/%i/.xpra __USER_HOME_BASE__/%i/.config/xpra'
 ExecStart=/bin/bash -c '\
   exec /usr/bin/xpra start :${XPRA_DISPLAY} \
     --bind-tcp=127.0.0.1:${XPRA_PORT} \
@@ -25,12 +25,15 @@ ExecStart=/bin/bash -c '\
     --speaker=no \
     --microphone=no \
     --xvfb=/usr/bin/Xvfb \
-    --socket-dir=/home/%i/.xpra'
+    --socket-dir=__USER_HOME_BASE__/%i/.xpra'
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 
 # リソース制限はドロップイン /etc/systemd/system/xpra@username.service.d/resources.conf で設定
+# 上記の二重アンダースコア囲みの文字列は install-backend.sh がインストール
+# 時に USER_HOME_BASE（既定 /home）で置換するプレースホルダー
+# （詳細は vscode@.service 参照）。
 
 [Install]
 WantedBy=devbox@%i.target

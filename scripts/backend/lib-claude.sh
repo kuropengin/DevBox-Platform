@@ -38,7 +38,8 @@ claude_configure_vscode_extension() {
   local headroom_base_url="${3:-}"
   local headroom_token="${4:-}"
   local claude_bin="${CLAUDE_BIN:-$(command -v claude || echo /usr/bin/claude)}"
-  local settings_dir="/home/${username}/.vscode/server-data/data/User"
+  local home_dir; home_dir="$(devbox_user_home "$username")"
+  local settings_dir="${home_dir}/.vscode/server-data/data/User"
   local settings_file="${settings_dir}/settings.json"
 
   mkdir -p "$settings_dir"
@@ -89,7 +90,7 @@ with open(settings_file, "w", encoding="utf-8") as f:
     f.write("\n")
 PYEOF
 
-  chown -R "${username}:${username}" "/home/${username}/.vscode/server-data/data"
+  chown -R "${username}:${username}" "${home_dir}/.vscode/server-data/data"
 }
 
 # $HOME/.claude/settings.json を用意し、（Headroom設定があれば）env ブロックに
@@ -101,7 +102,8 @@ claude_setup_user_settings() {
   local email="${2:-}"
   local headroom_base_url="${3:-}"
   local headroom_token="${4:-}"
-  local claude_dir="/home/${username}/.claude"
+  local home_dir; home_dir="$(devbox_user_home "$username")"
+  local claude_dir="${home_dir}/.claude"
   local settings_file="${claude_dir}/settings.json"
 
   mkdir -p "$claude_dir"

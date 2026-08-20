@@ -17,12 +17,20 @@
 #                          （例: 10.0.1.5 / 10.0.1.0/24 / 127.0.0.1）。
 #                          未設定の場合、backend の 80 番ポートは
 #                          firewalld で一切開放されない（安全側デフォルト）。
+#   USER_HOME_BASE         任意。ユーザーディレクトリの作成先ベースディレクトリ
+#                          （既定: /home）。マウントした別ボリュームにユーザー
+#                          ディレクトリを作りたい場合に指定する
+#                          （例: /mnt/userdata。事前にマウント済みであること）。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 DEVBOX_BACKEND_PORT=80
+# ユーザーディレクトリの作成先ベースディレクトリ（マウントした別ボリューム
+# 等を指定したい場合に上書きできる）。末尾のスラッシュは正規化する。
+USER_HOME_BASE="${USER_HOME_BASE:-/home}"
+USER_HOME_BASE="${USER_HOME_BASE%/}"
 
 # shellcheck source=../lib-common.sh
 source "${SCRIPT_DIR}/../lib-common.sh"
@@ -46,6 +54,7 @@ done
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[ $EUID -ne 0 ]] && die "rootで実行してください: sudo -E bash install-backend.sh"
+[[ "$USER_HOME_BASE" == /* ]] || die "USER_HOME_BASE は絶対パスで指定してください（指定値: ${USER_HOME_BASE}）"
 
 if ! grep -qiE 'rhel|almalinux|rocky' /etc/os-release 2>/dev/null; then
   warn "RHEL 9 系以外の環境です。続行しますが動作を保証しません"
@@ -239,11 +248,15 @@ ok "ディレクトリ作成完了"
 
 # ─── 13. systemd テンプレートユニット ────────────────────────────────────────
 info "systemd ユニットをインストール中..."
-for unit in devbox@.target vscode@.service xpra@.service; do
-  cp "${REPO_DIR}/systemd/${unit}" "/etc/systemd/system/${unit}"
+cp "${REPO_DIR}/systemd/devbox@.target" "/etc/systemd/system/devbox@.target"
+# vscode@.service / xpra@.service は __USER_HOME_BASE__ プレースホルダーを
+# 含むため、USER_HOME_BASE で実際のパスに置換してからコピーする（systemd の
+# %h 指定子は User= の設定を反映しないため使えない）。
+for unit in vscode@.service xpra@.service; do
+  sed "s|__USER_HOME_BASE__|${USER_HOME_BASE}|g" "${REPO_DIR}/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
 systemctl daemon-reload
-ok "systemd ユニットインストール完了"
+ok "systemd ユニットインストール完了（ユーザーディレクトリ: ${USER_HOME_BASE}/<username>）"
 
 # ─── 14. backend プラットフォーム設定を保存（adduser-backend.sh が参照） ─────
 # front の platform.conf に相当する、backend 側の永続設定。Headroom
@@ -254,6 +267,7 @@ ok "systemd ユニットインストール完了"
 cat > /etc/devbox/backend-platform.conf << BACKEND_PLATFORM_EOF
 HEADROOM_BASE_URL=${HEADROOM_BASE_URL:-}
 DEVBOX_HEADROOM_TOKEN=${DEVBOX_HEADROOM_TOKEN:-}
+USER_HOME_BASE=${USER_HOME_BASE}
 BACKEND_PLATFORM_EOF
 chmod 600 /etc/devbox/backend-platform.conf
 if [[ -z "${HEADROOM_BASE_URL:-}" || -z "${DEVBOX_HEADROOM_TOKEN:-}" ]]; then

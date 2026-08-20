@@ -20,11 +20,18 @@
 #   ANTHROPIC_API_KEY      必須。Headroom（LLMプロキシ）が使う実 Anthropic APIキー
 #   BACKEND_ALLOWED_SOURCES  Headroomのポートを許可する backend の IP/CIDR
 #                            （カンマ区切りで複数可）。未設定時は一切開放しない
+#   USER_HOME_BASE         任意。ポータルがVS Code初回アクセス時に自動で開く
+#                          ~/workspace のパス計算に使う（デフォルト: /home）。
+#                          backend側のinstall-backend.envのUSER_HOME_BASEと
+#                          同じ値を指定すること（一致しないと初回オープンの
+#                          パスが正しく解決できない）。
 
 set -euo pipefail
 
 DOMAIN="${DEVBOX_DOMAIN:-devbox.example.com}"
 DEVBOX_DIR="/opt/devbox"
+USER_HOME_BASE="${USER_HOME_BASE:-/home}"
+USER_HOME_BASE="${USER_HOME_BASE%/}"
 LLDAP_BASE_DN="dc=devbox,dc=local"
 LLNG_CLI="/usr/libexec/lemonldap-ng/bin/lemonldap-ng-cli"
 TLS_DIR="/etc/devbox/tls"
@@ -244,6 +251,7 @@ JSON_EOF
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash install-front.sh"
+[[ "$USER_HOME_BASE" == /* ]] || die "USER_HOME_BASE は絶対パスで指定してください（指定値: ${USER_HOME_BASE}）"
 
 if ! grep -qiE 'rhel|almalinux|rocky' /etc/os-release 2>/dev/null; then
   warn "RHEL 9 系以外の環境です。続行しますが動作を保証しません"
@@ -339,8 +347,11 @@ fi
 ok "ディレクトリ作成完了"
 
 # ─── 8. ポータル HTML ─────────────────────────────────────────────────────────
+# __USER_HOME_BASE__ プレースホルダーを USER_HOME_BASE の実際の値に置換して
+# 配置する（VS Code初回アクセス時に自動で開く ~/workspace のパス計算に使う。
+# backend側のUSER_HOME_BASEと一致している必要がある）。
 info "ポータル HTML をコピー中..."
-cp "${REPO_DIR}/portal/index.html" "${DEVBOX_DIR}/portal/index.html"
+sed "s|__USER_HOME_BASE__|${USER_HOME_BASE}|g" "${REPO_DIR}/portal/index.html" > "${DEVBOX_DIR}/portal/index.html"
 ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
 # ─── 9. Headroom（LLMプロキシ） ────────────────────────────────────────────────

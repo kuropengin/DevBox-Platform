@@ -266,6 +266,12 @@ install-backend.sh が行うこと:
 ください。`DEVBOX_INTERNAL_TOKEN` を指定しない場合、install-backend.sh は
 エラーで停止します（無防備な backend が意図せずできることを防ぐため）。
 
+ユーザーディレクトリ（`/home/<username>` 相当）をマウントした別ボリューム
+に作りたい場合は `USER_HOME_BASE`（例: `/mnt/userdata`、事前にマウント
+済みであること）を指定してください。詳細は
+[ユーザーディレクトリの配置先](#ユーザーディレクトリの配置先)を参照して
+ください。
+
 ### 3. ユーザー追加（backend → front の2段階）
 
 ```bash
@@ -524,6 +530,55 @@ front↔backend間の内部通信ポートは固定で **80** です
 `/etc/devbox/users/${USERNAME}.conf` を生成する箇所に追記するだけで、
 上記の仕組みにより自動的に VS Code 側からも参照可能になります
 （`vscode@.service`/`xpra@.service` 側の変更は不要）。
+
+## ユーザーディレクトリの配置先
+
+既定ではユーザーディレクトリは通常の Linux ホームディレクトリ
+（`/home/<username>`）に作成されますが、`USER_HOME_BASE` を指定すること
+でマウントした別ボリューム（例: `/mnt/userdata`）配下に作成できます。
+
+**backend側**（`install-backend.env`）:
+
+```bash
+USER_HOME_BASE=/mnt/userdata
+```
+
+`useradd --base-dir "$USER_HOME_BASE"` でユーザーを作成するため、実際の
+ホームは `${USER_HOME_BASE}/<username>` になります。指定するボリュームは
+事前にマウント済みである必要があります（`install-backend.sh`/
+`adduser-backend.sh` 自体はマウント処理を行いません）。
+
+`vscode@.service`/`xpra@.service`（[systemd/vscode@.service](systemd/vscode@.service)）
+は `WorkingDirectory=`/`Environment=HOME=` 等に実パスを必要とするため、
+`install-backend.sh` が systemd ユニットをインストールする際に
+`__USER_HOME_BASE__` プレースホルダーを実際の値へ置換します（systemd の
+`%h` 指定子は `User=` の設定を反映しない＝常にサービスマネージャ自身の
+ホームになってしまうため使えません）。`adduser-backend.sh`・
+[lib-vscode-extensions.sh](scripts/backend/lib-vscode-extensions.sh)・
+[lib-claude.sh](scripts/backend/lib-claude.sh) 側は
+`devbox_user_home()`（[lib-common.sh](scripts/lib-common.sh)、`/etc/passwd`
+の実際の値を参照）を使って解決するため、`USER_HOME_BASE` を変更しても
+追加のコード変更は不要です。
+
+**front側**（`install-front.env`、任意）:
+
+```bash
+USER_HOME_BASE=/mnt/userdata
+```
+
+ポータルが VS Code 初回アクセス時に自動で開く `~/workspace`
+（[アクセス構成](#アクセス構成)参照）のパスを組み立てるために使います。
+front はbackendのファイルシステムを直接参照できないため、**backend側の
+`USER_HOME_BASE` と同じ値を front 側にも指定してください**（一致しない
+と初回オープンのパスが誤ったものになります。1台構成の場合は前後半で
+共通の値を使うので特に注意）。未設定時は従来通り `/home` として扱われ、
+これまでと同じ動作になります。
+
+`USER_HOME_BASE` を後から変更した場合は、対象の backend/front で
+`install-backend.sh`/`install-front.sh` を再実行してください
+（systemd ユニット・ポータル HTML に値が焼き込まれるため、設定ファイルの
+更新だけでは反映されません）。既存ユーザーのホームディレクトリは
+移動されません。
 
 ## VS Code 拡張機能
 

@@ -27,12 +27,14 @@ source "${SCRIPT_DIR}/lib-vscode-extensions.sh"
 source "${SCRIPT_DIR}/lib-claude.sh"
 
 # backend-platform.conf が存在すれば設定を読み込む（install-backend.sh が生成、
-# HEADROOM_BASE_URL / DEVBOX_HEADROOM_TOKEN）
+# HEADROOM_BASE_URL / DEVBOX_HEADROOM_TOKEN / USER_HOME_BASE）
 [[ -f /etc/devbox/backend-platform.conf ]] && source /etc/devbox/backend-platform.conf
 
 VSCODE_PORT_BASE=10000
 XPRA_PORT_BASE=14500
 TOMCAT_PORT_BASE=18080
+USER_HOME_BASE="${USER_HOME_BASE:-/home}"
+USER_HOME_BASE="${USER_HOME_BASE%/}"
 
 [[ $EUID -ne 0 ]] && die "rootで実行してください: sudo bash adduser-backend.sh <username> <email>"
 [[ $# -lt 2 ]]    && die "使い方: bash adduser-backend.sh <username> <email> [--cpu 200%] [--mem 4G]"
@@ -64,15 +66,17 @@ info "ユーザー '$USERNAME' を追加します (email: ${EMAIL}, CPU: ${CPU_Q
 echo ""
 
 # ─── 1. Linux ユーザー作成 ─────────────────────────────────────────────────────
-info "Linux ユーザーを作成中..."
-useradd --create-home --shell /bin/bash --comment "DevBox User" "$USERNAME"
+info "Linux ユーザーを作成中... (ホーム: ${USER_HOME_BASE}/${USERNAME})"
+mkdir -p "$USER_HOME_BASE"
+useradd --create-home --shell /bin/bash --comment "DevBox User" --base-dir "$USER_HOME_BASE" "$USERNAME"
 USER_UID=$(id -u "$USERNAME")
-ok "ユーザー作成完了 (UID: ${USER_UID})"
+USER_HOME="$(devbox_user_home "$USERNAME")"
+ok "ユーザー作成完了 (UID: ${USER_UID}, ホーム: ${USER_HOME})"
 
 # 作業用フォルダ（VS Code初回アクセス時にポータルが自動で開く）
-mkdir -p "/home/${USERNAME}/workspace"
-chown "${USERNAME}:${USERNAME}" "/home/${USERNAME}/workspace"
-ok "作業フォルダ作成完了 (/home/${USERNAME}/workspace)"
+mkdir -p "${USER_HOME}/workspace"
+chown "${USERNAME}:${USERNAME}" "${USER_HOME}/workspace"
+ok "作業フォルダ作成完了 (${USER_HOME}/workspace)"
 
 # ─── 2. ポート計算 ─────────────────────────────────────────────────────────────
 # UID オフセットでポートを決定（UID 1000 → 10000 / 14500 / 18080）。

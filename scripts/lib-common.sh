@@ -38,3 +38,12 @@ devbox_validate_email() {
   [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "無効なメールアドレス: $email"
   return 0
 }
+
+# 指定した Linux ユーザーの実際のホームディレクトリを返す（/etc/passwd の
+# 6番目のフィールド）。USER_HOME_BASE（マウント場所の変更等）でホーム
+# ディレクトリの置き場所を変えても、常に実際の値を参照できるようにする
+# ための共通ヘルパー。ユーザーが存在しない場合は空文字を返す。
+# 引数: $1 = ユーザー名
+devbox_user_home() {
+  getent passwd "$1" | cut -d: -f6
+}

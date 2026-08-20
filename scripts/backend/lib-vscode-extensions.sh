@@ -56,7 +56,8 @@ vscode_ext_build_master() {
 # 引数: $1 = ユーザー名
 vscode_ext_sync_to_user() {
   local username="$1"
-  local vscode_dir="/home/${username}/.vscode"
+  local home_dir; home_dir="$(devbox_user_home "$username")"
+  local vscode_dir="${home_dir}/.vscode"
   local server_data_dir="${vscode_dir}/server-data"
   local target_dir="${server_data_dir}/extensions"
 
@@ -96,7 +97,8 @@ vscode_ext_sync_to_user() {
 # 引数: $1 = ユーザー名
 vscode_set_default_settings() {
   local username="$1"
-  local settings_dir="/home/${username}/.vscode/server-data/data/User"
+  local home_dir; home_dir="$(devbox_user_home "$username")"
+  local settings_dir="${home_dir}/.vscode/server-data/data/User"
   local settings_file="${settings_dir}/settings.json"
 
   mkdir -p "$settings_dir"
@@ -122,7 +124,7 @@ with open(settings_file, "w", encoding="utf-8") as f:
     f.write("\n")
 PYEOF
 
-  chown -R "${username}:${username}" "/home/${username}/.vscode/server-data/data"
+  chown -R "${username}:${username}" "${home_dir}/.vscode/server-data/data"
 }
 
 # 既存の全ユーザー（/etc/devbox/users/*.conf）へ配布する

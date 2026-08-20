@@ -8,23 +8,28 @@ Type=simple
 User=%i
 Group=%i
 EnvironmentFile=/etc/devbox/users/%i.conf
-WorkingDirectory=/home/%i
-Environment=HOME=/home/%i
+WorkingDirectory=__USER_HOME_BASE__/%i
+Environment=HOME=__USER_HOME_BASE__/%i
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-ExecStartPre=/bin/bash -c 'mkdir -p /home/%i/.vscode/cli-data /home/%i/.vscode/server-data'
+ExecStartPre=/bin/bash -c 'mkdir -p __USER_HOME_BASE__/%i/.vscode/cli-data __USER_HOME_BASE__/%i/.vscode/server-data'
 ExecStart=/usr/bin/code serve-web \
     --host 127.0.0.1 \
     --port $VSCODE_PORT \
     --without-connection-token \
     --accept-server-license-terms \
     --server-base-path /%i/vscode \
-    --cli-data-dir /home/%i/.vscode/cli-data \
-    --server-data-dir /home/%i/.vscode/server-data
+    --cli-data-dir __USER_HOME_BASE__/%i/.vscode/cli-data \
+    --server-data-dir __USER_HOME_BASE__/%i/.vscode/server-data
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10s
 
 # リソース制限はドロップイン /etc/systemd/system/vscode@username.service.d/resources.conf で設定
+# 上記の二重アンダースコア囲みの文字列は install-backend.sh がインストール
+# 時に USER_HOME_BASE（既定 /home）で置換するプレースホルダー。systemd の
+# %h 指定子は User= の設定を反映しない（常にサービスマネージャ自身の
+# ホームになる）ため使えないことを systemd(252) man ページで確認した上で
+# この方式にしている。
 
 [Install]
 WantedBy=devbox@%i.target

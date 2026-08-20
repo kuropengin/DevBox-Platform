@@ -10,7 +10,7 @@
 # オプション:
 #   --purge   ホームディレクトリ（コード・データ含む）も完全に削除する。
 #             省略時はホームディレクトリを残す（Linux アカウントのみ削除、
-#             データは /home/<username> に残ったまま。誤削除からの復旧や
+#             データはホームディレクトリに残ったまま。誤削除からの復旧や
 #             監査のため、デフォルトでは残す）。
 
 set -euo pipefail
@@ -34,6 +34,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 id "$USERNAME" &>/dev/null || die "ユーザー '$USERNAME' は存在しません"
+
+# userdel 実行後は /etc/passwd のエントリが消えて解決できなくなるため、
+# 先に実際のホームディレクトリを控えておく（USER_HOME_BASE設定に応じて
+# /home 以外の場合もある）。
+USER_HOME="$(devbox_user_home "$USERNAME")"
 
 echo ""
 info "ユーザー '$USERNAME' を削除します（ホームディレクトリ: $([[ "$PURGE" == "yes" ]] && echo "完全削除" || echo "保持")）"
@@ -91,7 +96,7 @@ if [[ "$PURGE" == "yes" ]]; then
   ok "ユーザー削除完了（ホームディレクトリも削除しました）"
 else
   userdel "$USERNAME"
-  ok "ユーザー削除完了（ホームディレクトリは /home/${USERNAME} に残しています）"
+  ok "ユーザー削除完了（ホームディレクトリは ${USER_HOME} に残しています）"
 fi
 
 # ─── 完了 ─────────────────────────────────────────────────────────────────────
@@ -101,8 +106,8 @@ echo -e "${GREEN}  ユーザー '${USERNAME}' の backend 側削除が完了し�
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 if [[ "$PURGE" == "no" ]]; then
-  echo "  ホームディレクトリ /home/${USERNAME} は残っています。"
-  echo "  完全に削除する場合: sudo rm -rf /home/${USERNAME}"
+  echo "  ホームディレクトリ ${USER_HOME} は残っています。"
+  echo "  完全に削除する場合: sudo rm -rf ${USER_HOME}"
   echo ""
 fi
 echo "  front 側の登録解除がまだであれば、front サーバーで"

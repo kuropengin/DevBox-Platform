@@ -153,11 +153,14 @@
 
       // 初回アクセス時だけ ~/workspace を自動で開く（2回目以降は素の
       // vscode/ にして、ユーザーが開いていた別フォルダを維持できるように
-      // する）
+      // する）。下の二重アンダースコア囲みの文字列は install-front.sh が
+      // インストール時に置換するプレースホルダー（backendのUSER_HOME_BASEと
+      // 合わせること。詳細はREADMEの「ユーザーディレクトリの配置先」参照）。
+      const userHomeBase = '__USER_HOME_BASE__';
       let vscodeHref = base + '/vscode/';
       const workspaceOpenedKey = 'devbox-workspace-opened-' + username;
       if (!localStorage.getItem(workspaceOpenedKey)) {
-        vscodeHref += '?folder=' + encodeURIComponent('/home/' + username + '/workspace');
+        vscodeHref += '?folder=' + encodeURIComponent(userHomeBase + '/' + username + '/workspace');
         localStorage.setItem(workspaceOpenedKey, '1');
       }
       document.getElementById('vscode-link').href = vscodeHref;
