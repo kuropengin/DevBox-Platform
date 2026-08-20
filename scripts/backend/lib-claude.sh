@@ -26,6 +26,15 @@
 #     検証する）。x-user-id にはユーザーのメールアドレスを入れ、Headroom が
 #     x-headroom-* 以外のヘッダを上流 Anthropic まで転送する仕組みを使って
 #     Anthropic 側にも届くようにする。
+#   - ANTHROPIC_MODEL 等、環境ごとに追加したい環境変数は
+#     /etc/devbox/claude-extra-env.conf（KEY=VALUE 形式、雛形は
+#     templates/claude-extra-env.conf.example）に書くと自動的に取り込まれる。
+#     ANTHROPIC_BASE_URL 等の固定値（Headroom 接続に必須）は常にこのファイルの
+#     内容より優先され、上書きされない。
+#   - これらの関数は adduser-backend.sh がユーザー作成時に一度だけ呼び出す。
+#     既存ユーザーの ~/.claude/settings.json / VS Code settings.json を
+#     再生成する仕組みは無いため、claude-extra-env.conf を変更しても
+#     既存ユーザーには自動反映されない（新規作成ユーザーにのみ反映される）。
 
 # ユーザーの VS Code User settings に claudeCode.claudeProcessWrapper と
 # （Headroom設定があれば）claudeCode.environmentVariables を設定する
@@ -37,6 +46,7 @@ claude_configure_vscode_extension() {
   local email="${2:-}"
   local headroom_base_url="${3:-}"
   local headroom_token="${4:-}"
+  local extra_env_file="${5:-/etc/devbox/claude-extra-env.conf}"
   local claude_bin="${CLAUDE_BIN:-$(command -v claude || echo /usr/bin/claude)}"
   local home_dir; home_dir="$(devbox_user_home "$username")"
   local settings_dir="${home_dir}/.vscode/server-data/data/User"
@@ -44,12 +54,27 @@ claude_configure_vscode_extension() {
 
   mkdir -p "$settings_dir"
 
-  python3 - "$settings_file" "$claude_bin" "$headroom_base_url" "$headroom_token" "$email" << 'PYEOF'
+  python3 - "$settings_file" "$claude_bin" "$headroom_base_url" "$headroom_token" "$email" "$extra_env_file" << 'PYEOF'
 import json
 import os
 import sys
 
-settings_file, claude_bin, headroom_base_url, headroom_token, email = sys.argv[1:6]
+settings_file, claude_bin, headroom_base_url, headroom_token, email, extra_env_file = sys.argv[1:7]
+
+
+def load_extra_env(path):
+    extra = {}
+    if not path or not os.path.exists(path):
+        return extra
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            extra[key.strip()] = value.strip()
+    return extra
+
 
 data = {}
 if os.path.exists(settings_file):
@@ -62,11 +87,12 @@ data["claudeCode.claudeProcessWrapper"] = claude_bin
 
 if headroom_base_url and headroom_token:
     custom_headers = f"X-Headroom-Proxy-Token: {headroom_token}\nx-user-id: {email}"
-    desired = {
+    desired = load_extra_env(extra_env_file)
+    desired.update({
         "ANTHROPIC_BASE_URL": headroom_base_url,
         "ANTHROPIC_AUTH_TOKEN": headroom_token,
         "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
-    }
+    })
 
     existing = data.get("claudeCode.environmentVariables", [])
     if not isinstance(existing, list):
@@ -102,6 +128,7 @@ claude_setup_user_settings() {
   local email="${2:-}"
   local headroom_base_url="${3:-}"
   local headroom_token="${4:-}"
+  local extra_env_file="${5:-/etc/devbox/claude-extra-env.conf}"
   local home_dir; home_dir="$(devbox_user_home "$username")"
   local claude_dir="${home_dir}/.claude"
   local settings_file="${claude_dir}/settings.json"
@@ -109,12 +136,27 @@ claude_setup_user_settings() {
   mkdir -p "$claude_dir"
   [[ -f "$settings_file" ]] || echo '{}' > "$settings_file"
 
-  python3 - "$settings_file" "$headroom_base_url" "$headroom_token" "$email" << 'PYEOF'
+  python3 - "$settings_file" "$headroom_base_url" "$headroom_token" "$email" "$extra_env_file" << 'PYEOF'
 import json
 import os
 import sys
 
-settings_file, headroom_base_url, headroom_token, email = sys.argv[1:5]
+settings_file, headroom_base_url, headroom_token, email, extra_env_file = sys.argv[1:6]
+
+
+def load_extra_env(path):
+    extra = {}
+    if not path or not os.path.exists(path):
+        return extra
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            extra[key.strip()] = value.strip()
+    return extra
+
 
 data = {}
 if os.path.exists(settings_file):
@@ -125,6 +167,7 @@ if os.path.exists(settings_file):
 
 if headroom_base_url and headroom_token:
     env = data.setdefault("env", {})
+    env.update(load_extra_env(extra_env_file))
     env["ANTHROPIC_BASE_URL"] = headroom_base_url
     env["ANTHROPIC_AUTH_TOKEN"] = headroom_token
     env["ANTHROPIC_CUSTOM_HEADERS"] = f"X-Headroom-Proxy-Token: {headroom_token}\nx-user-id: {email}"

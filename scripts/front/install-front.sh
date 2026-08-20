@@ -396,13 +396,22 @@ fi
 # この値は内部にダブルクォートを含む JSON なので、systemd/headroom.service
 # が bash 経由で source する前提でシングルクォートで囲む（実機検証済み:
 # ダブルクォートを裸で置くと bash の source 時にクォートが剥がされ壊れる）。
+# テンプレート（templates/headroom.env.template）の __PLACEHOLDER__ を sed で
+# 置換して生成する。置換値は sed のメタ文字（\ & 区切り文字|）を含みうる
+# 外部由来の値（APIキー等）なので、置換前にエスケープする。
+_headroom_sed_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//&/\\&}
+  s=${s//|/\\|}
+  printf '%s' "$s"
+}
 mkdir -p /etc/devbox
-cat > /etc/devbox/headroom.env << HEADROOM_EOF
-ANTHROPIC_TARGET_API_HEADERS='{"x-api-key":"${ANTHROPIC_API_KEY}","anthropic-version":"2023-06-01"}'
-HEADROOM_PROXY_TOKEN=${DEVBOX_HEADROOM_TOKEN}
-HEADROOM_HOST=0.0.0.0
-HEADROOM_PORT=${DEVBOX_HEADROOM_PORT}
-HEADROOM_EOF
+sed \
+  -e "s|__ANTHROPIC_API_KEY__|$(_headroom_sed_escape "$ANTHROPIC_API_KEY")|" \
+  -e "s|__DEVBOX_HEADROOM_TOKEN__|$(_headroom_sed_escape "$DEVBOX_HEADROOM_TOKEN")|" \
+  -e "s|__DEVBOX_HEADROOM_PORT__|$(_headroom_sed_escape "$DEVBOX_HEADROOM_PORT")|" \
+  "${REPO_DIR}/templates/headroom.env.template" > /etc/devbox/headroom.env
 chmod 600 /etc/devbox/headroom.env
 
 cp "${REPO_DIR}/systemd/headroom.service" /etc/systemd/system/headroom.service

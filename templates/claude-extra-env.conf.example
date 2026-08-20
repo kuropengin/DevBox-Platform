@@ -1,0 +1,15 @@
+# DevBox Platform - Claude Code に追加で渡す環境変数（任意）
+#
+# 使い方: このファイルを /etc/devbox/claude-extra-env.conf にコピーして編集する。
+# adduser-backend.sh 実行時（ユーザー作成時）に読み込まれ、~/.claude/settings.json
+# の env ブロックと、VS Code拡張機能の claudeCode.environmentVariables の両方に
+# 追加される。ANTHROPIC_BASE_URL・ANTHROPIC_AUTH_TOKEN・ANTHROPIC_CUSTOM_HEADERS
+# （Headroom接続に必須）はここに書いても常に固定値で上書きされる。
+#
+# 形式: KEY=VALUE を1行に1つ。# から始まる行・空行は無視される。
+#
+# 注意: 既に作成済みのユーザーには自動反映されない
+# （adduser-backend.sh は新規ユーザー作成時にのみ設定ファイルを生成するため）。
+
+# ANTHROPIC_MODEL=claude-sonnet-5
+# ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001
