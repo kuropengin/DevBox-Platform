@@ -200,6 +200,7 @@ setup_lemonldap() {
   "staticPrefix": "/_auth/static",
   "cookieName": "devboxauth",
   "securedCookie": 1,
+  "timeout": 259200,
   "notification": 0,
   "applicationList": {},
   "locationRules": {
