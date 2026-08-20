@@ -71,8 +71,12 @@ echo "╚═══════════════════════�
 echo ""
 
 # ─── 1. EPEL + 基本パッケージ ─────────────────────────────────────────────────
+# epel-release は AlmaLinux/Rocky の extras リポジトリには存在するが、
+# サブスクリプション登録した実 RHEL には存在しないため、EPEL 公式が配布する
+# RPM を直接 URL 指定でインストールする（この方法はディストリビューション
+# によらず動作する。scripts/front/install-front.sh も同様）。
 info "EPEL リポジトリと基本パッケージをインストール中..."
-dnf install -y epel-release
+dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${MAJOR_VER}.noarch.rpm"
 dnf install -y curl git python3 rsync tar
 
 dnf config-manager --set-enabled crb 2>/dev/null || \

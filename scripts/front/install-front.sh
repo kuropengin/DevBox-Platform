@@ -276,8 +276,13 @@ echo "╚═══════════════════════�
 echo ""
 
 # ─── 1. EPEL + 基本パッケージ ─────────────────────────────────────────────────
+# epel-release は AlmaLinux/Rocky の extras リポジトリには存在するが、
+# サブスクリプション登録した実 RHEL には存在しないため、EPEL 公式が配布する
+# RPM を直接 URL 指定でインストールする（実機確認済み: RHEL 8.10 で
+# "epel-release" が "引数に一致する結果がありません" になる。この方法は
+# ディストリビューションによらず動作する）。
 info "EPEL リポジトリと基本パッケージをインストール中..."
-dnf install -y epel-release
+dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${MAJOR_VER}.noarch.rpm"
 dnf install -y curl python3 openssl
 
 dnf config-manager --set-enabled crb 2>/dev/null || \
