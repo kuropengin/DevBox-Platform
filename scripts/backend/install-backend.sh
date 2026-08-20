@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# DevBox Platform - backend サーバー インストールスクリプト (RHEL 9 系)
-# 対応: AlmaLinux 9 / Rocky Linux 9 / RHEL 9
+# DevBox Platform - backend サーバー インストールスクリプト (RHEL 8/9 系)
+# 対応: AlmaLinux 8/9 / Rocky Linux 8/9 / RHEL 8/9
 # 使い方: FRONT_ALLOWED_SOURCE=<frontのIP/CIDR> sudo -E bash install-backend.sh
 #
 # backend サーバーの役割: ユーザーごとの実体（vscode@/xpra@ systemd サービス）
@@ -57,15 +57,16 @@ done
 [[ "$USER_HOME_BASE" == /* ]] || die "USER_HOME_BASE は絶対パスで指定してください（指定値: ${USER_HOME_BASE}）"
 
 if ! grep -qiE 'rhel|almalinux|rocky' /etc/os-release 2>/dev/null; then
-  warn "RHEL 9 系以外の環境です。続行しますが動作を保証しません"
+  warn "RHEL 8/9 系以外の環境です。続行しますが動作を保証しません"
 fi
 MAJOR_VER=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
-[[ "$MAJOR_VER" -lt 9 ]] && die "RHEL 9 以上が必要です (検出: ${MAJOR_VER})"
+[[ "$MAJOR_VER" -lt 8 ]] && die "RHEL 8 以上が必要です (検出: ${MAJOR_VER})"
+[[ "$MAJOR_VER" -eq 8 ]] && warn "RHEL 8 系は動作未検証です"
 
 echo ""
 echo "╔══════════════════════════════════╗"
 echo "║   DevBox Platform - backend      ║"
-echo "║   RHEL 9 系                      ║"
+echo "║   RHEL 8/9 系                    ║"
 echo "╚══════════════════════════════════╝"
 echo ""
 

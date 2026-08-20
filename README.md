@@ -1,6 +1,6 @@
 # DevBox Platform
 
-RHEL 9 系（AlmaLinux 9 / Rocky Linux 9）で VS Code + Linux デスクトップ環境を
+RHEL 8/9 系（AlmaLinux 8/9 / Rocky Linux 8/9）で VS Code + Linux デスクトップ環境を
 ユーザーごとに提供するプラットフォームです。**front（認証 + ポータル配信）**
 と **backend（ユーザーごとの実体・複数台に水平分割可能）** の2層構成で、
 ユーザー数の増加に応じて backend を増設できます。1台構成にもできます
@@ -164,7 +164,8 @@ devbox-platform/
 
 ## 動作環境
 
-- AlmaLinux 9 / Rocky Linux 9 / RHEL 9（front・backend とも）
+- AlmaLinux 8/9 / Rocky Linux 8/9 / RHEL 8/9（front・backend とも。**RHEL 8系は動作未検証**。front では
+  Headroom が必要とする python3.11 パッケージに RHEL 8.9 以降が必要）
 - SELinux: Enforcing のまま動作（自動設定。ただし LemonLDAP::NG 部分は
   Enforcing 環境での動作を未検証、[LemonLDAP::NG / LLDAP 構成](#lemonldapng--lldap-構成) 参照）
 - コンテナ / VM 不使用（すべてネイティブインストール）

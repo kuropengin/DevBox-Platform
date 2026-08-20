@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# DevBox Platform - front サーバー インストールスクリプト (RHEL 9 系)
-# 対応: AlmaLinux 9 / Rocky Linux 9 / RHEL 9
+# DevBox Platform - front サーバー インストールスクリプト (RHEL 8/9 系)
+# 対応: AlmaLinux 8/9 / Rocky Linux 8/9 / RHEL 8/9
 # 使い方: sudo bash install-front.sh
 #
 # front サーバーの役割: 認証（LLDAP + LemonLDAP::NG）とポータル配信、
@@ -85,14 +85,21 @@ setup_lldap() {
   mkdir -p /etc/devbox
 
   # ─── OBS リポジトリ登録 ──────────────────────────────────────────────────────
+  # OBS 上のディレクトリ名は el9 のみ "CentOS-9_Stream"（ハイフン）、el8 は
+  # "CentOS_8_Stream"（アンダースコアのみ）と表記揺れがあるため、MAJOR_VER
+  # ごとに実在を確認した文字列をそのまま使う（2026-08時点でリポジトリ一覧を
+  # 確認済み: どちらのディレクトリにも lldap/lldap-set-password の RPM が
+  # 存在する。ただし実機での dnf install 動作は el8 では未検証）。
+  local obs_dist_dir="CentOS-9_Stream"
+  [[ "$MAJOR_VER" -eq 8 ]] && obs_dist_dir="CentOS_8_Stream"
   if [[ ! -f /etc/yum.repos.d/lldap.repo ]]; then
-    cat > /etc/yum.repos.d/lldap.repo << 'REPO_EOF'
+    cat > /etc/yum.repos.d/lldap.repo << REPO_EOF
 [home_Masgalor_LLDAP]
-name=LLDAP - Light LDAP implementation for authentication (CentOS-9_Stream)
+name=LLDAP - Light LDAP implementation for authentication (${obs_dist_dir})
 type=rpm-md
-baseurl=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/CentOS-9_Stream/
+baseurl=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/${obs_dist_dir}/
 gpgcheck=1
-gpgkey=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/CentOS-9_Stream/repodata/repomd.xml.key
+gpgkey=https://download.opensuse.org/repositories/home:/Masgalor:/LLDAP/${obs_dist_dir}/repodata/repomd.xml.key
 enabled=1
 REPO_EOF
   fi
@@ -255,15 +262,16 @@ JSON_EOF
 [[ "$USER_HOME_BASE" == /* ]] || die "USER_HOME_BASE は絶対パスで指定してください（指定値: ${USER_HOME_BASE}）"
 
 if ! grep -qiE 'rhel|almalinux|rocky' /etc/os-release 2>/dev/null; then
-  warn "RHEL 9 系以外の環境です。続行しますが動作を保証しません"
+  warn "RHEL 8/9 系以外の環境です。続行しますが動作を保証しません"
 fi
 MAJOR_VER=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
-[[ "$MAJOR_VER" -lt 9 ]] && die "RHEL 9 以上が必要です (検出: ${MAJOR_VER})"
+[[ "$MAJOR_VER" -lt 8 ]] && die "RHEL 8 以上が必要です (検出: ${MAJOR_VER})"
+[[ "$MAJOR_VER" -eq 8 ]] && warn "RHEL 8 系は動作未検証です（LLDAPリポジトリのみ8系ビルドに切替）"
 
 echo ""
 echo "╔══════════════════════════════════╗"
 echo "║   DevBox Platform - front        ║"
-echo "║   RHEL 9 系                      ║"
+echo "║   RHEL 8/9 系                    ║"
 echo "╚══════════════════════════════════╝"
 echo ""
 
@@ -363,10 +371,13 @@ ok "ポータル HTML → ${DEVBOX_DIR}/portal/index.html"
 
 info "Headroom（LLMプロキシ）をインストール中..."
 if ! command -v python3.11 &>/dev/null; then
-  # headroom-ai は Python 3.10 以上が必須。RHEL 9 系の既定 python3 は 3.9 の
-  # ため、AppStream の python3.11 を別途インストールして使う（実機確認済み:
-  # 既定 python3.9 では "No matching distribution found" で失敗する）。
-  dnf install -y python3.11 python3.11-pip
+  # headroom-ai は Python 3.10 以上が必須。既定の python3 は RHEL 9 系で 3.9、
+  # RHEL 8 系で 3.6 のため、AppStream の python3.11 を別途インストールして使う
+  # （実機確認済み: 既定 python3.9 では "No matching distribution found" で
+  # 失敗する）。python3.11 は RHEL 8.9 以降の AppStream で提供されており、
+  # それより古い 8.x マイナーバージョンでは見つからない可能性がある。
+  dnf install -y python3.11 python3.11-pip || \
+    die "python3.11 のインストールに失敗しました。RHEL 8 系では 8.9 以降が必要です（dnf update でマイナーバージョンを上げてから再実行してください）"
 fi
 if ! command -v headroom &>/dev/null; then
   python3.11 -m pip install "headroom-ai[proxy]"
