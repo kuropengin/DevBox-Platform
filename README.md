@@ -287,7 +287,7 @@ sudo bash scripts/front/register-user.sh tanaka --backend 10.0.2.12
 `--backend` にはユーザーを配置した backend サーバーの IP（または
 `host:port`。port省略時は80）を指定します。**どの backend に
 配置するかは管理者が明示的に選びます**（自動割り当てはしません）。
-`<email>` は Headroom 経由で Claude を使う際の `X-User-Id` ヘッダに
+`<email>` は Headroom 経由で Claude を使う際の `x-user-id` ヘッダに
 使われます（詳細は[後述](#headroomllmプロキシ)）。
 
 adduser-backend.sh が行うこと（backend 上）:
@@ -733,7 +733,7 @@ adduser-backend.sh が行うこと（ユーザーごと）:
 [Headroom](https://github.com/headroomlabs-ai/headroom)（LLMトークン圧縮
 プロキシ。`ANTHROPIC_BASE_URL` を向けるだけで Claude Code から使える）を
 導入し、実キーは front だけが保持します。backend 上の各ユーザーは Headroom
-を経由して Claude を使い、リクエストには `X-User-Id: <メールアドレス>`
+を経由して Claude を使い、リクエストには `x-user-id: <メールアドレス>`
 ヘッダが付与されます。
 
 ```
@@ -741,7 +741,7 @@ front                                          backend（ユーザーごと）
 ┌──────────────────────┐                        ┌──────────────────────┐
 │ Headroom（8787番）      │  ← X-Headroom-Proxy-  │ Claude Code CLI        │
 │  ANTHROPIC_TARGET_     │    Token で認証         │  ANTHROPIC_BASE_URL   │
-│  API_HEADERS で実の      │  ← X-User-Id はそのまま │  → Headroom            │
+│  API_HEADERS で実の      │  ← x-user-id はそのまま │  → Headroom            │
 │  x-api-key を注入して    │    上流Anthropicまで   │  ANTHROPIC_CUSTOM_     │
 │  Anthropicへ            │    転送                │  HEADERS で両方付与     │
 └──────────────────────┘                        └──────────────────────┘
@@ -775,7 +775,7 @@ front                                          backend（ユーザーごと）
 |---|---|---|
 | `ANTHROPIC_BASE_URL` | `HEADROOM_BASE_URL` | Headroom を Claude のエンドポイントにする |
 | `ANTHROPIC_AUTH_TOKEN` | `DEVBOX_HEADROOM_TOKEN` | Claude Code 自体のログイン画面を回避するためのダミー資格情報（Headroom自体はこの値を見ない） |
-| `ANTHROPIC_CUSTOM_HEADERS` | `X-Headroom-Proxy-Token: <token>\nX-User-Id: <email>` | 前者はHeadroomクライアント認証用、後者はユーザー識別用。Headroom は `x-headroom-*` 接頭辞のヘッダだけを上流送信前に除去するため、`X-User-Id` は Anthropic まで届く |
+| `ANTHROPIC_CUSTOM_HEADERS` | `X-Headroom-Proxy-Token: <token>\nx-user-id: <email>` | 前者はHeadroomクライアント認証用、後者はユーザー識別用。Headroom は `x-headroom-*` 接頭辞のヘッダだけを上流送信前に除去するため、`x-user-id` は Anthropic まで届く |
 
 `claudeCode.disableLoginPrompt: true` も合わせて設定し、拡張機能側の
 ログイン画面が出ないようにします。`HEADROOM_BASE_URL`/

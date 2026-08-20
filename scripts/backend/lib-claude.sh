@@ -23,7 +23,7 @@
 #     共有トークンをそのまま流用する（Claude Code はこの変数が無いと
 #     ANTHROPIC_BASE_URL を設定していてもログイン画面を出してしまうための
 #     ダミー資格情報。Headroom 自体は X-Headroom-Proxy-Token ヘッダで別途
-#     検証する）。X-User-Id にはユーザーのメールアドレスを入れ、Headroom が
+#     検証する）。x-user-id にはユーザーのメールアドレスを入れ、Headroom が
 #     x-headroom-* 以外のヘッダを上流 Anthropic まで転送する仕組みを使って
 #     Anthropic 側にも届くようにする。
 
@@ -61,7 +61,7 @@ if os.path.exists(settings_file):
 data["claudeCode.claudeProcessWrapper"] = claude_bin
 
 if headroom_base_url and headroom_token:
-    custom_headers = f"X-Headroom-Proxy-Token: {headroom_token}\nX-User-Id: {email}"
+    custom_headers = f"X-Headroom-Proxy-Token: {headroom_token}\nx-user-id: {email}"
     desired = {
         "ANTHROPIC_BASE_URL": headroom_base_url,
         "ANTHROPIC_AUTH_TOKEN": headroom_token,
@@ -127,7 +127,7 @@ if headroom_base_url and headroom_token:
     env = data.setdefault("env", {})
     env["ANTHROPIC_BASE_URL"] = headroom_base_url
     env["ANTHROPIC_AUTH_TOKEN"] = headroom_token
-    env["ANTHROPIC_CUSTOM_HEADERS"] = f"X-Headroom-Proxy-Token: {headroom_token}\nX-User-Id: {email}"
+    env["ANTHROPIC_CUSTOM_HEADERS"] = f"X-Headroom-Proxy-Token: {headroom_token}\nx-user-id: {email}"
 
 with open(settings_file, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)

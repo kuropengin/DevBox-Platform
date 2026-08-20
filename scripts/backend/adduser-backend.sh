@@ -7,7 +7,7 @@
 #   --mem    メモリ上限（MemoryMax、例: 4G）         デフォルト: 4G
 #
 # email は Headroom（front側LLMプロキシ）経由で Claude を使う際の
-# X-User-Id ヘッダに使われる（詳細は lib-claude.sh・README の
+# x-user-id ヘッダに使われる（詳細は lib-claude.sh・README の
 # 「Headroom」セクション参照）。
 #
 # このスクリプトは Linux ユーザー・systemd サービス・backend ローカルの
